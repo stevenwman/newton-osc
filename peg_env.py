@@ -21,6 +21,7 @@ HOLE_XY_NOISE = 0.02
 HOLE_Z_NOISE = 0.01
 HOLE_JOINT = 11
 ARM_DOF = 7
+SETTLE_STEPS = 30          # gravity-comp settle so the controller captures its target at rest
 
 
 def _wxyz(q_xyzw):
@@ -97,14 +98,29 @@ class PegEnv:
         self._set_hole(HOLE_NOMINAL + off)
         self.solver.reset(self.state_0)
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state_0)
-        # One raw settle step (no controller.apply) to populate mjw_data
-        # (qM/bias/xpos) AND let the pose settle, THEN init the controller so its
-        # target matches the actual current fingertip (no startup error/jump).
+        # Settle to populate mjw_data (qM/bias/xpos) while HOLDING the start pose,
+        # THEN init the controller so its target matches the current fingertip at
+        # REST. A free-fall settle (zero force) lets the arm sag during these steps;
+        # an OSC controller then captures a *moving* target -> startup lurch (this
+        # was the lesson from bare_arm_view.py). We hold the pose two ways so it's
+        # correct for either controller: (a) servo targets for any POSITION-mode
+        # dofs (JointPos arm; OSC fingers), and (b) gravity comp fed into the arm
+        # dofs for an OSC NONE-mode arm. Free joints take no joint_f, so the welded
+        # peg just hangs at its seated pose.
+        tq = self.control.joint_target_pos.numpy()
+        tq[:ARM_DOF] = self._arm_init
+        tq[ARM_DOF:ARM_DOF + 2] = self.finger
+        self.control.joint_target_pos.assign(tq)
         self.control.joint_f.zero_()
-        for _ in range(scene.SUBSTEPS):
+        for _ in range(SETTLE_STEPS):
             self.state_0.clear_forces()
+            bias = self.solver.mjw_data.qfrc_bias.numpy().reshape(-1)
+            jf = self.control.joint_f.numpy()
+            jf[:ARM_DOF] = bias[:ARM_DOF]
+            self.control.joint_f.assign(jf)
             self.solver.step(self.state_0, self.state_1, self.control, None, scene.SIM_DT)
             self.state_0, self.state_1 = self.state_1, self.state_0
+        self.control.joint_f.zero_()          # hand a clean force buffer to the controller
         self.controller.reset(self)
         self.steps = 0
         return self._obs()
