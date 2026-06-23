@@ -1,0 +1,16 @@
+[project]
+name = "newton-manip"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "distrax>=0.1.9",
+    "flax>=0.12.7",
+    "jax[cuda12]>=0.10.2",
+    "newton[examples]",
+    "optax>=0.2.8",
+]
+
+[tool.uv.sources]
+newton = { git = "https://github.com/newton-physics/newton.git" }
