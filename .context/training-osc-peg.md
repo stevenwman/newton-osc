@@ -101,9 +101,47 @@ contact budget (`nconmax=1024, njmax=4096` in `peg_env.py`) — needed to avoid
 contact overflow → NaN; the training loop also has a non-finite-step guard that
 resets instead of crashing.
 
-## Open items / next steps
-- [ ] Batch the env (`replicate`) for throughput — the single biggest win.
-- [ ] Privileged asymmetric critic obs.
-- [ ] Eval/checkpoint-rollout script + success-rate metric (peg seated).
-- [ ] Revisit OSC action: absolute vs EMA-delta for exploration; orientation gain.
-- [ ] Longer run once batched (jax_rl uses millions of env steps).
+## v2 run (current) — fixes applied vs v1
+
+`runs/osc_peg_v2/` — retrain with: **stiff weld** (jax_rl solref 0.001/solimp 0.999;
+v1 was soft ~9mm residual, peg flopped), **fixed spawn** (v1 spawned the peg TIP
+~1.8cm *below* the bore — no approach phase; now ~2.7cm above, matching jax_rl),
+**obs 30-d** (+ goal hole pos + last action), **delta action** (jax_rl-style,
+`--action-mode delta`), and **success-rate logging** (`succ%(50)` column;
+`info["success"]` from `peg_reward.is_success`). Reward already byte-identical to
+jax_rl. Done = TimeLimit only (matches jax_rl). Still single-env (~6 h / 400k).
+
+## BATCHING PLAN (deferred — the big next step, ~the rewrite to do next session)
+
+Single biggest throughput win; deferred only because it's a multi-file rewrite not
+worth shipping unverified overnight. Pattern proven in `old/franka_batch_env.py`
+(arm-only) and the backend-validation memory (~1–2 M sim-steps/s at N=1024–4096).
+Concrete steps:
+
+1. **`peg_scene_newton.build_model(num_envs=N)`**: build the single-env builder `b`
+   (add_mjcf + collision filters + weld + arm-control cb), then
+   `top = ModelBuilder(); top.replicate(b, N, spacing=(0,0,0)); return top.finalize()`.
+   Call `SolverMuJoCo.register_custom_attributes(b)` before adding geometry. The
+   weld/eq-constraints are on `b` (single-world indices HAND=8/PEG=12); replicate
+   clones them per world. Verify `model.equality_constraint_count == 2*N`.
+2. **`peg_env`**: `nworld=N`. `joint_q/qd` are world-major → reshape `(N, ncoord/ndof)`.
+   - reset: per-world hole DR (write `joint_X_p` for each world's HOLE_JOINT),
+     seat peg per world, settle (the gravity-comp settle is already array-friendly).
+     Per-world reset on `done` via `solver.reset(state, world_mask=wp.array(bool[N]))`.
+   - obs: build `(N, 30)`. action: `(N, 6)`. reward/success: **`jax.vmap`** the
+     `peg_reward.compute_reward`/`is_success` over the N worlds (they currently take
+     scalars; the math is per-world). The OSC (`controllers.py`) is *already* batched
+     (leading `nw` axis, `joint_f` for N worlds) — apply() needs the weld-stiffen +
+     `mjw.forward` to stay; HAND_MJW_ID etc. are per-world so index with stride.
+3. **`train_peg_osc`**: vectorize the loop — `select_action` on `(N, obs)`,
+   `buf.add_batch` with `(N, ...)`, N env-steps per iteration. Scale
+   `grad_updates_per_step` and the replay size; keep `XLA_PYTHON_CLIENT_MEM_FRACTION`
+   modest but note the **warp sim** (not JAX) dominates VRAM at large N.
+4. Smoke at N=64 (finite losses, no NaN, no contact overflow → bump nconmax/njmax if
+   needed), then scale N=512–1024 and run millions of env steps.
+
+## Other next steps
+- [ ] Privileged asymmetric critic obs (jax_rl: fixed_pos/quat, gains, thresholds).
+- [ ] Watch `succ%` in v2 — if it climbs, the weld+spawn fixes unlocked insertion.
+- [ ] Tune OSC orientation gain if rotation tracking lags (Kp 30 vs 100 pos).
+- [ ] C51 v_min/v_max if returns exceed range once inserting (per-step max ~7).
