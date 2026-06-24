@@ -6,6 +6,9 @@ peg reward. reset seats the peg in the gripper + randomizes the hole pose.
 Not batched yet (num_envs=1); replicate() later.
 """
 
+import os
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # else JAX grabs ~75% of VRAM at init
+
 import jax.numpy as jnp
 import numpy as np
 import warp as wp

@@ -12,6 +12,9 @@ Per-step max ≈ 6.0 at seated success state (r_B_desc ≈ 1.0 + r_success = 5.0
 """
 from typing import Tuple
 
+import os
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")  # else JAX grabs ~75% of VRAM at init
+
 import jax
 import jax.numpy as jp
 
