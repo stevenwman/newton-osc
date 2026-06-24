@@ -167,3 +167,28 @@ Key API facts (Newton 1.4.0.dev0):
 **Caveats:** JAX per-step sync cost ~35-40% (probe uses naive
 block_until_ready+synchronize; real training amortizes). Arm-only numbers —
 contact-heavy manip (bricks/grasp) will be slower; re-bench with real scene.
+
+## OSC controller fixed (was scrambled Jacobian) + RL training running
+
+The peg-env OSC was unstable for a long time; root cause = a buffer-shape bug.
+`mujoco_warp.jac` writes `(nworld, 3, nv)` but `OSCController` allocated
+`(nw, nv, 3)` + a transpose, scrambling J. Garbage J -> wrong-sign EE velocity ->
+negative damping -> "holds at ~0 error, diverges under any motion". Fix: allocate
+`(nw, 3, nv)`, drop the transpose (`controllers.py` setup/apply). Now converges to
+sub-mm and holds; cond(J M^-1 J^T) drops ~1e5(artifact)->1e2. Full recipe + the
+diagnostic signature + sharp edges in `.context/lessons/osc-implementation-and-the-
+scrambled-jacobian.md`. Secondary real fixes folded in: `mjw.forward()` before
+reading mjw_data (forward-then-integrate staleness -> gravity-comp energy
+injection); robosuite cross-product orientation error (vs fragile matrix-log);
+absolute base-frame pose action; ridge 1e-4. Verified: `osc_track_demo.py` (GUI,
+target+EE RGB axes) tracks random workspace poses; translation converges faster
+than rotation (Kp 100 vs 30). The earlier "near-singular ARM_Q / weld / payload /
+contacts" conclusions were all artifacts of the bad Jacobian.
+
+RL: `train_peg_osc.py` = FastSAC on the OSC peg env (jax_rl-style: warmup->collect
+->replay->C51 update), 6-DOF OSC action. Single-env smoke trains with finite,
+decreasing losses; ~0.7GB VRAM (prealloc=false, mem_fraction=0.2 — good neighbor).
+Overnight run in `runs/osc_peg/` (best_actor.pkl, ckpt.pkl, train.log). Biggest
+TODO for real perf = batch the env via `replicate()` (OSC math already batched;
+env routing from the backend-validation harness). Outline: `.context/training-osc-
+peg.md`.
