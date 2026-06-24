@@ -23,6 +23,8 @@ import imageio.v2 as iio
 import newton
 from jax_rl.algos.fast_sac import FastSAC
 from jax_rl.configs.fast_sac_config import FastSACConfig
+from jax_rl.algos.flash_sac import FlashSAC
+from jax_rl.configs.flash_sac_config import FlashSACConfig
 from controllers import OSCController
 from peg_env import PegEnv
 import peg_scene_newton as scene
@@ -36,6 +38,8 @@ ap.add_argument("--fps", type=int, default=30)
 ap.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
 ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
                 help="must match the action mode the checkpoint was trained with")
+ap.add_argument("--algo", choices=["fastsac", "flashsac"], default="fastsac",
+                help="which algo produced the checkpoint")
 args = ap.parse_args()
 
 ctrl = OSCController()
@@ -43,16 +47,28 @@ ctrl.action_mode = args.action_mode
 env = PegEnv(controller=ctrl, episode_length=args.episode_length, weld=True)
 
 # Rebuild the algo with the SAME cfg/dims used for training, just to get select_action.
-cfg = FastSACConfig(
-    hidden_dim=(256, 256), critic_hidden_dim=(512, 512),
-    num_atoms=51, batch_size=256, min_buffer_size=2000,
-    grad_updates_per_step=4, policy_delay=2,
-)
-algo = FastSAC(cfg, env.obs_dim, env.act_dim, optax.adamw(3e-4), optax.adam(cfg.alpha_lr), gamma=0.97)
+actor_bs = None      # FlashSAC needs BatchNorm running stats; FastSAC doesn't
 with open(args.ckpt, "rb") as f:
     loaded = pickle.load(f)
-actor_params = loaded.actor_params if hasattr(loaded, "actor_params") else loaded
-print(f"[replay] loaded {args.ckpt} ({'train_state' if hasattr(loaded, 'actor_params') else 'actor_params'})")
+if args.algo == "flashsac":
+    cfg = FlashSACConfig(num_blocks=2, actor_hidden_dim=128, critic_hidden_dim=256,
+                         expansion=4, num_atoms=101, v_min=-5.0, v_max=5.0)
+    algo = FlashSAC(cfg, env.obs_dim, env.act_dim, optax.adamw(3e-4), optax.adam(3e-4),
+                    gamma=0.99, critic_obs_dim=env.obs_dim, num_envs=1)
+    # ckpt is {"actor_params":..., "actor_batch_stats":...} (best_actor) or a TrainingState.
+    if isinstance(loaded, dict) and "actor_params" in loaded:
+        actor_params, actor_bs = loaded["actor_params"], loaded["actor_batch_stats"]
+    else:
+        actor_params, actor_bs = loaded.actor_params, loaded.actor_batch_stats
+else:
+    cfg = FastSACConfig(
+        hidden_dim=(256, 256), critic_hidden_dim=(512, 512),
+        num_atoms=51, batch_size=256, min_buffer_size=2000,
+        grad_updates_per_step=4, policy_delay=2,
+    )
+    algo = FastSAC(cfg, env.obs_dim, env.act_dim, optax.adamw(3e-4), optax.adam(cfg.alpha_lr), gamma=0.97)
+    actor_params = loaded.actor_params if hasattr(loaded, "actor_params") else loaded
+print(f"[replay] loaded {args.ckpt} (algo={args.algo})")
 
 viewer = newton.viewer.ViewerGL(headless=True)
 viewer.set_model(env.model)
@@ -68,7 +84,9 @@ for ep in range(args.episodes):
     peg_min_z = 1e9
     for i in range(args.episode_length):
         key, k = jax.random.split(key)
-        a = algo.select_action(actor_params, jnp.asarray(obs)[None], k, deterministic=not args.stochastic)
+        _kw = {"actor_batch_stats": actor_bs} if args.algo == "flashsac" else {}
+        a = algo.select_action(actor_params, jnp.asarray(obs)[None], k,
+                               deterministic=not args.stochastic, **_kw)
         obs, rew, done, info = env.step(np.asarray(a[0]))
         ep_ret += float(np.asarray(rew).reshape(-1)[0])
         peg = env.state_0.body_q.numpy()[scene.PEG_BODY_IDX]

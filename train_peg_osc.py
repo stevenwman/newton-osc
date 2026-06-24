@@ -48,6 +48,12 @@ def main():
                     help="SAC minibatch size (raise for batched runs to hit replay ratio ~8)")
     ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
                     help="OSC action: 'delta' (jax_rl-style, bounded error) or 'absolute' base-frame pose")
+    ap.add_argument("--reward-scale", type=float, default=0.1,
+                    help="scale rewards into the buffer (jax_rl peg preset uses 0.1; keeps the "
+                         "discounted value inside the C51 [v_min,v_max] support, else it clips ~20 "
+                         "-> flat Q in z -> hover trap)")
+    ap.add_argument("--gamma", type=float, default=0.99,
+                    help="discount (jax_rl peg preset = 0.99)")
     args = ap.parse_args()
 
     N = args.num_envs
@@ -71,12 +77,12 @@ def main():
     # FastSAC config — matches the validated smoke config, scaled up for a real run.
     cfg = FastSACConfig(
         hidden_dim=(256, 256), critic_hidden_dim=(512, 512),
-        num_atoms=51, batch_size=args.batch_size, min_buffer_size=args.min_buffer,
+        num_atoms=101, batch_size=args.batch_size, min_buffer_size=args.min_buffer,
         grad_updates_per_step=args.grad_updates or 4, policy_delay=2,
     )
     optimizer = optax.adamw(3e-4, b2=0.95, weight_decay=0.001)
     alpha_opt = optax.adam(cfg.alpha_lr)
-    algo = FastSAC(cfg, env.obs_dim, env.act_dim, optimizer, alpha_opt, gamma=0.97)
+    algo = FastSAC(cfg, env.obs_dim, env.act_dim, optimizer, alpha_opt, gamma=args.gamma)
 
     key = jax.random.PRNGKey(args.seed)
     key, k = jax.random.split(key)
@@ -104,9 +110,10 @@ def main():
             ep_ret[:] = 0.0; ep_succ[:] = False
             continue
         done_col = np.full(N, float(done), np.float32)
-        buf.add_batch(obs=obs, action=action, reward=rew, next_obs=nobs,
+        buf.add_batch(obs=obs, action=action,
+                      reward=np.asarray(rew) * args.reward_scale, next_obs=nobs,
                       done=done_col, truncation=done_col)
-        ep_ret += np.asarray(rew)
+        ep_ret += np.asarray(rew)        # log RAW return (comparable to jax_rl ~3000 scale)
         ep_succ |= info["success"]
         obs = nobs
         if done:

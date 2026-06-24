@@ -28,6 +28,11 @@ ASSET_HEIGHT = 0.025
 HOLE_NOMINAL = np.array([0.6, 0.0, 0.05], dtype=np.float32)
 HOLE_XY_NOISE = 0.02
 HOLE_Z_NOISE = 0.01
+ARM_RESET_NOISE = 0.02     # ±rad/joint perturbation of the arm start pose each reset
+                           # (matches jax_rl). Broadens the reset state distribution so
+                           # exploration reaches aligned∧low_z states the critic needs to
+                           # learn descent — without it the deterministic start + 6-DOF
+                           # rotation action-noise stays stuck in the hover trap.
 HOLE_JOINT = 11            # local (per-world) joint index of the fixtured hole
 PEG_BODY_LOCAL = 12        # local (per-world) body index of the peg
 HAND_BODY_LOCAL = scene.HAND_IDX   # 8
@@ -164,8 +169,15 @@ class PegEnv:
     # -- gym API ------------------------------------------------------------
     def reset(self):
         N = self.num_envs
+        # Per-reset arm-pose noise (±ARM_RESET_NOISE rad/joint). Use the SAME noisy
+        # config for the start qpos AND the settle servo target below — otherwise the
+        # settle (which servos to the target) would pull the arm back to _arm_init and
+        # erase the perturbation.
+        arm_start = (self._arm_init
+                     + self.rng.uniform(-ARM_RESET_NOISE, ARM_RESET_NOISE,
+                                        size=(N, ARM_DOF)).astype(np.float32))
         q = self.model.joint_q.numpy().reshape(N, self.ncoord)
-        q[:, :7] = self._arm_init
+        q[:, :7] = arm_start
         q[:, 7:9] = self.finger
         self.model.joint_q.assign(q.reshape(-1))
         self._seat_peg()
@@ -186,7 +198,7 @@ class PegEnv:
         # dofs for an OSC NONE-mode arm. Free joints take no joint_f, so the welded
         # peg just hangs at its seated pose.
         tq = self.control.joint_target_pos.numpy().reshape(N, self.ndof)
-        tq[:, :ARM_DOF] = self._arm_init
+        tq[:, :ARM_DOF] = arm_start
         tq[:, ARM_DOF:ARM_DOF + 2] = self.finger
         self.control.joint_target_pos.assign(tq.reshape(-1))
         self.control.joint_f.zero_()
