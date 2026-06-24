@@ -192,3 +192,44 @@ Overnight run in `runs/osc_peg/` (best_actor.pkl, ckpt.pkl, train.log). Biggest
 TODO for real perf = batch the env via `replicate()` (OSC math already batched;
 env routing from the backend-validation harness). Outline: `.context/training-osc-
 peg.md`.
+
+## Batched training scaled on RTX 5090 (32GB) — contact-budget semantics bug FIXED
+
+Moved to RTX 5090 (32GB) to scale batched training. Hit OOM at N=512: convex
+narrowphase tried to alloc an **18GB `epa_pr`** array. Root cause = wrong contact-budget
+scaling in `peg_env.py`. CORRECTION to the earlier "budgets are TOTAL" note — in this
+mujoco_warp the two knobs differ (verified via `sol.mjw_data` at N=512):
+- `nconmax` is **PER-WORLD**: mjw sets `naconmax = naccdmax = nconmax * nworld`.
+- `njmax` is **TOTAL** across the batch (`mjw_data.njmax == passed value`).
+Old `nconmax = max(1024, N*32)` scaled a per-world knob by N → grew N^2 via the internal
+`*nworld`; EPA scratch `(naccdmax, 6 + 5*ccd_iterations)` (ccd_iterations=35, vec3)
+exploded to 18GB at N=512. FIX: `nconmax = 256` CONSTANT (~128x the ~2-contacts/world
+measured peak); keep `njmax = max(4096, N*128)` (total, correctly scales with N; `njmax*nv`
+drives the `efc_J` alloc — N*256 OOM'd a 4GiB array, N*128 ample). After fix: N=512
+builds+steps, ~4.6GB Warp / ~6.5GB total VRAM, no NaN. (Benign warning `Triangle pair
+buffer overflowed 7087104 > 1000000` — separate broadphase buffer, step still fine; may
+drop contacts under heavy insertion, revisit if needed.)
+
+Added `--batch-size` CLI arg to `train_peg_osc.py` (default 256). Batched launch (replay
+ratio 8): `--num-envs 512 --batch-size 1024 --grad-updates 4 --steps 200000
+--episode-length 128 --action-mode delta --outdir runs/osc_peg_b512`. ~5810 env-sps,
+~5h for 102.4M env-steps. First iters finite (q_loss ~1.3, actor ~-19, no NaN). OPEN
+QUESTION still: does scale push succ% off 0? (single-env plateaued at succ%=0).
+
+### Scaling N: the efc_J O(N^2) trap + throughput findings (RTX 5090 32GB)
+- `njmax` drives the **dense** constraint Jacobian `efc_J ≈ njmax × nv_total`, and
+  `nv_total = nv_perworld × N` ALSO scales with N -> `efc_J` is **O(N^2)**. The old
+  `njmax = max(4096, N*128)` made an 8 GiB efc_J at N=512/1024 (fit) but a **32 GiB**
+  single-array OOM at N=2048. FIX: `njmax = max(4096, N*32)` (~32 efc/world, ~3.5x the
+  ~9 resting peak) -> ~8 GiB efc_J at N=2048. Bump if insertion contacts overflow efc.
+- **N=2048 works**: batch 4096 / grad 4 (replay ratio 8), ~17 GB / 32 GB VRAM, util ~52%,
+  168 W, finite losses, no NaN. **~14k env-sps = ~2x** the ~7k at N=512/1024 (throughput
+  DOES scale here; an earlier 512->1024 "flat env-sps" read was confounded by differing
+  batch sizes). 100k iters * 2048 = 204.8M env-steps, ~4h. Run: `runs/osc_peg_b2048/`.
+- GPU-util note: the train loop is sequential (collect sim-step -> grad update); at small
+  N the contact-solve kernels are latency-bound so the GPU idles during the sim phase, and
+  bigger grad BATCH is nearly free wall-clock (rr16 cost only ~16% env-sps for 2x learning)
+  but doesn't raise util (idle is in the sim phase, not grad). Util rises only with N
+  (bigger sim kernels). Per control step: SUBSTEPS=4 sol.steps @ iterations=100/ls=50 (heavy
+  contact solve = the env-sps cap). Lowering solver iters would speed sim but risks the
+  stiff weld / OSC fidelity (untested).

@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--min-buffer", type=int, default=2000)
     ap.add_argument("--grad-updates", type=int, default=None,
                     help="grad updates per iteration (default: config value)")
+    ap.add_argument("--batch-size", type=int, default=256,
+                    help="SAC minibatch size (raise for batched runs to hit replay ratio ~8)")
     ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
                     help="OSC action: 'delta' (jax_rl-style, bounded error) or 'absolute' base-frame pose")
     args = ap.parse_args()
@@ -69,7 +71,7 @@ def main():
     # FastSAC config — matches the validated smoke config, scaled up for a real run.
     cfg = FastSACConfig(
         hidden_dim=(256, 256), critic_hidden_dim=(512, 512),
-        num_atoms=51, batch_size=256, min_buffer_size=args.min_buffer,
+        num_atoms=51, batch_size=args.batch_size, min_buffer_size=args.min_buffer,
         grad_updates_per_step=args.grad_updates or 4, policy_delay=2,
     )
     optimizer = optax.adamw(3e-4, b2=0.95, weight_decay=0.001)

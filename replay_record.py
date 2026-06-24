@@ -34,9 +34,12 @@ ap.add_argument("--episode-length", type=int, default=128)
 ap.add_argument("--out", default="runs/osc_peg/replay.mp4")
 ap.add_argument("--fps", type=int, default=30)
 ap.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
+ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
+                help="must match the action mode the checkpoint was trained with")
 args = ap.parse_args()
 
 ctrl = OSCController()
+ctrl.action_mode = args.action_mode
 env = PegEnv(controller=ctrl, episode_length=args.episode_length, weld=True)
 
 # Rebuild the algo with the SAME cfg/dims used for training, just to get select_action.
@@ -67,7 +70,7 @@ for ep in range(args.episodes):
         key, k = jax.random.split(key)
         a = algo.select_action(actor_params, jnp.asarray(obs)[None], k, deterministic=not args.stochastic)
         obs, rew, done, info = env.step(np.asarray(a[0]))
-        ep_ret += rew
+        ep_ret += float(np.asarray(rew).reshape(-1)[0])
         peg = env.state_0.body_q.numpy()[scene.PEG_BODY_IDX]
         peg_min_z = min(peg_min_z, float(peg[2]))
         viewer.begin_frame(t)

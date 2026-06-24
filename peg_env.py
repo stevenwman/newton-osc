@@ -55,14 +55,22 @@ class PegEnv:
         # insertion intent) destabilize Newton's SolverMuJoCo here — the free arm
         # gains energy and flies up. Default cone/impratio are stable. Revisit if
         # tight-clearance insertion needs the stiffer contact model.
-        # Contact budgets are TOTAL across the batch in mujoco_warp -> scale with N
-        # (floored at the single-env values so N=1 is unchanged). Measured: at rest
-        # ~7 efc/world (weld+finger-coupling), under contact peak ~2 contacts &
-        # ~9 efc/world with hover actions; a policy inserting against the 32 bore
-        # tiles is higher, so budget ~16x the hover peak. (njmax drives a big
-        # efc_J alloc — N*256 OOM'd a 4GiB array at N=512; N*128 is ample headroom.)
-        nconmax = max(1024, N * 32)
-        njmax = max(4096, N * 128)
+        # Contact budget semantics in this mujoco_warp differ between the two knobs
+        # (verified by inspecting mjw_data at N=512):
+        #   nconmax is PER-WORLD  -> mjw sets naconmax = naccdmax = nconmax * nworld.
+        #   njmax   is TOTAL across the batch (njmax_eff == passed value).
+        # So nconmax must be a CONSTANT (do NOT scale by N, or it grows N^2 via the
+        # internal *nworld and the convex-narrowphase EPA scratch explodes — N*32
+        # blew an 18 GB epa_pr alloc at N=512). 256 contacts/world is ~128x the
+        # measured peak (~2 contacts/world). njmax IS total -> scale with N; ~128
+        # efc/world headroom over the ~9 measured. BUT the dense efc_J alloc is
+        # njmax * nv_total, and nv_total ALSO scales with N -> efc_J is O(N^2):
+        # N*128 gave an 8 GiB efc_J at N=512/1024 (fit in 32 GB) but a 32 GiB OOM at
+        # N=2048. So keep the per-world njmax multiplier modest. N*32 (~32 efc/world,
+        # ~3.5x the resting peak) -> ~8 GiB efc_J at N=2048. Bump if insertion
+        # contacts overflow efc -> NaN.
+        nconmax = 256
+        njmax = max(4096, N * 32)
         self.solver = newton.solvers.SolverMuJoCo(
             self.model, use_mujoco_contacts=True,
             nconmax=nconmax, njmax=njmax, iterations=100, ls_iterations=50)
