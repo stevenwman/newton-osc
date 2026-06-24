@@ -55,7 +55,35 @@ obs); no privileged critic yet.
    action/obs normalization, eval, or wandb. Add these for a serious run.
 5. **C51 v_min/v_max** may need widening if returns exceed the configured range.
 
-## Evaluate a checkpoint
+## Result of the first 400k-step run (single env)
+
+Ran ~6 h (400k steps, 17.9 sps, single env). best ep_ret 454 (stochastic);
+deterministic eval ~170–300. **What the policy learned:** align above the bore
+(xy + tilt) and drive the peg down to the bore opening (`peg_min_z` ≈ 0.063–0.080;
+bore top ≈ 0.075) — but it does **not** reliably *seat* (would need peg z < ~0.055
+with `r_success`). So: alignment + approach solved, full insertion not yet. The
+reward is the v18 phased reward (`peg_reward.py`): per step ≈ `r_align`(≤2, aligned
+above) + `r_B_desc`(≤1, aligned descent) + `r_floor`(≤2, at seated z) +
+`r_success`(≤5, fully seated). Over 128 steps: hover-aligned ≈ 256, full sustained
+insertion ≈ ~900. This is consistent with the single-env / 400k-step budget being
+small; batching + more steps is the expected path to insertion (jax_rl's 6-DOF runs
+plateau ~880 and the tuned 3-DOF hit 6545 with far more env steps).
+
+## Record a video / evaluate a checkpoint
+
+`replay_record.py` rolls out `best_actor.pkl` (or `ckpt.pkl`) and records an mp4 via
+the headless GL viewer (`viewer.get_frame()` -> imageio, same as
+jax_rl/projects/mud_eval). Needs `imageio[ffmpeg]` (installed in .venv; add to
+pyproject for reproducibility). Run with the venv python + a display:
+
+    PYTHONPATH=. DISPLAY=:1 .venv/bin/python replay_record.py --episodes 3 \
+        --out runs/osc_peg/replay.mp4            # add --stochastic to sample
+
+(`uv run` sometimes re-syncs/strips the pip-installed imageio; calling
+`.venv/bin/python` directly is more reliable. Headless GL still needs an X display
+or EGL — `DISPLAY=:1` works here.)
+
+## Evaluate a checkpoint (programmatic)
 
 `best_actor.pkl` holds the actor params. To roll it out deterministically, load
 the pickle, `algo = FastSAC(...)` with the same cfg/dims, and call
