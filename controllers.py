@@ -258,8 +258,10 @@ class OSCController:
         ft_pos, ft_R = self._fingertip(d)
         self.last_ft_pos = np.asarray(ft_pos[0])
         self.last_ft_R = np.asarray(ft_R[0])
-        # Fingertip Jacobian at the world point (on-GPU, batched).
-        pt = wp.from_jax(ft_pos.reshape(-1).astype(jnp.float32)).view(wp.vec3)
+        # Fingertip Jacobian at the world point (on-GPU, batched). from_jax with
+        # dtype=vec3 maps the (nw,3) array -> (nw,) vec3 (the flatten+view form only
+        # worked at nw=1 — a flat (3*nw,) array can't be .view'd back to vec3).
+        pt = wp.from_jax(ft_pos.astype(jnp.float32), dtype=wp.vec3)
         mjw.jac(env.solver.mjw_model, d, self._jacp, self._jacr, pt, self._body)
         jacp = wp.to_jax(self._jacp)                    # (nw,3,nv)
         jacr = wp.to_jax(self._jacr)

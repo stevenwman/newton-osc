@@ -11,3 +11,6 @@ wheels/
 
 # training run artifacts
 runs/
+
+# scratch / probes
+.temp/

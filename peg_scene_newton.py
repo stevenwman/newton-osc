@@ -91,12 +91,15 @@ def materialize():
     return BUILD / "scene.xml"
 
 
-def build_model(arm_control_cb=None, weld=True):
-    """Build the peg scene. arm_control_cb(builder) configures arm joint control
-    (modes/gains); if None, defaults to a position servo (used by the viewer).
-    weld=False skips the grasp weld (peg falls away) — for isolating arm control."""
+def _build_builder(arm_control_cb=None, weld=True):
+    """Build the single-world peg-scene ModelBuilder (pre-finalize). Split out of
+    build_model so it can be replicate()'d for batched envs."""
     scene = materialize()
     b = newton.ModelBuilder()
+    # SolverMuJoCo needs its custom-attribute schema registered on the builder
+    # BEFORE geometry is added (required for replicate; also lets the weld's
+    # solref/solimp custom attrs be carried properly instead of half-filled).
+    newton.solvers.SolverMuJoCo.register_custom_attributes(b)
     b.add_mjcf(str(scene))
 
     # add_mjcf also drops the scene's <contact><exclude> finger<->peg pairs, so
@@ -136,7 +139,18 @@ def build_model(arm_control_cb=None, weld=True):
             b.joint_target_kd[i] = KD
     else:
         arm_control_cb(b)
-    return b.finalize()
+    return b
+
+
+def build_model(arm_control_cb=None, weld=True, num_envs=1):
+    """Finalize the peg scene. num_envs>1 replicates the single-world builder into
+    N worlds (world-major joint/body/eq arrays, spacing=0 for stability)."""
+    b = _build_builder(arm_control_cb, weld)
+    if num_envs == 1:
+        return b.finalize()
+    top = newton.ModelBuilder()
+    top.replicate(b, num_envs, spacing=(0.0, 0.0, 0.0))
+    return top.finalize()
 
 
 def seat_peg(model, state):

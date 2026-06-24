@@ -111,12 +111,30 @@ v1 was soft ~9mm residual, peg flopped), **fixed spawn** (v1 spawned the peg TIP
 `info["success"]` from `peg_reward.is_success`). Reward already byte-identical to
 jax_rl. Done = TimeLimit only (matches jax_rl). Still single-env (~6 h / 400k).
 
-## BATCHING PLAN (deferred — the big next step, ~the rewrite to do next session)
+## BATCHING — IMPLEMENTED + validated (N=1/8/64), VRAM-blocked from scaling on the shared dev GPU
 
-Single biggest throughput win; deferred only because it's a multi-file rewrite not
-worth shipping unverified overnight. Pattern proven in `old/franka_batch_env.py`
-(arm-only) and the backend-validation memory (~1–2 M sim-steps/s at N=1024–4096).
-Concrete steps:
+`peg_scene_newton.build_model(num_envs=N)` replicates; `PegEnv(num_envs=N)` routes
+per-world; `train_peg_osc.py --num-envs N` vectorizes the loop. Validated at
+N=1/8/64: finite losses, no NaN, clean synchronized resets, reward matches
+single-env, ~176 env-sps at N=64 (12x single-env's ~15). See `AGENT_GUIDE.md` for
+how to run it + pick N. Did NOT scale past 64 here: the shared dev GPU had ~6.7 GB
+taken by another user and the scene is collision-heavy (~15–20 MB/world), so N=256
+OOM'd. Continue on a bigger/free GPU.
+
+KEY FINDINGS (vs the original plan's assumptions):
+- `mjw_model` is **single-world**; batching is entirely in `mjw_data.nworld`. So
+  `equality_constraint_count` (Newton) = 2N but `mjw_model.neq` = 2, and the eq
+  arrays are `(nworld, neq, …)`. The weld-stiffen `sr[..., 1, :]` already spans
+  nworld — **no change needed**. Likewise the OSC controller was already batched.
+- The ONLY controller change: the jac point conversion. `from_jax(...).reshape(-1)
+  .view(wp.vec3)` only worked at N=1; use `wp.from_jax(ft_pos, dtype=wp.vec3)`.
+- Episodes are synchronized (done=TimeLimit only) → reset the whole batch at once,
+  no per-world masking.
+- Contact budgets are TOTAL across the batch: `nconmax=max(1024,N*32)`,
+  `njmax=max(4096,N*128)`. Original `N*256` OOM'd a 4 GiB `efc_J` array.
+- Reward/`is_success` are `jax.vmap`'d over worlds; obs stays on-GPU (`wp.to_jax`).
+
+Original plan steps (for reference):
 
 1. **`peg_scene_newton.build_model(num_envs=N)`**: build the single-env builder `b`
    (add_mjcf + collision filters + weld + arm-control cb), then
