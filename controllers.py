@@ -39,7 +39,7 @@ KD_JOINT = 8.0          # explicit joint-space damping (stabilizes the OSC)
 TORQUE_LIMIT = 100.0
 # Nullspace posture target = the env's IK start pose (well-conditioned), so the
 # nullspace term holds the home config instead of yanking toward a worse one.
-NULLSPACE_Q = jnp.array([-0.003, 0.476, 0.003, -2.032, -0.002, 2.508, 0.787])
+NULLSPACE_Q = jnp.array([-0.0166, 0.3849, 0.0169, -2.0429, -0.0086, 2.4447, 0.7924])  # = scene.ARM_Q
 ASSET_HEIGHT = 0.025
 HAND_MJW_ID = 9                                       # hand body id in mjw/mujoco (world=0)
 HAND_NEWTON_ID = 8                                    # hand body id in Newton state (world-excl)

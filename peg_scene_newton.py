@@ -32,10 +32,12 @@ BORE = PEG / "extracted" / "bore_tiles"
 BUILD = Path("/tmp/claude-1001/-home-stevenman-Desktop-Work-Research-newton-manip"
              "/6ab1e160-f7b3-488c-94fa-9f85a993736c/scratchpad/peg_build")
 
-# IK'd pose placing the fingertip ~3cm above the bore opening ([0.6,0,0.105]),
-# gripper down, WELL-CONDITIONED (cond(Lambda)~1200 vs ~1e5 for franka-ready,
-# which was near-singular in Y -> OSC torque blew up). Solved via CPU-mujoco IK.
-ARM_Q = [-0.003, 0.476, 0.003, -2.032, -0.002, 2.508, 0.787]
+# Gripper-down start pose placing the PEG TIP ~2.7cm ABOVE the bore opening
+# (fingertip z~0.150). The old pose placed the *fingertip* 3cm above the bore but
+# the peg hangs ~2.7cm below the fingertip, so its TIP spawned ~1.8cm BELOW the
+# bore top (already inside -> no approach phase, broken task). jax_rl spawns the
+# tip ~2cm above. OSC-calibrated, within joint limits, well-conditioned.
+ARM_Q = [-0.0166, 0.3849, 0.0169, -2.0429, -0.0086, 2.4447, 0.7924]
 FINGER = 0.04
 KP, KD = 400.0, 40.0
 # Peg seats at hand + R_hand·[0,0,+0.130] — SAME side as the fingertip site
