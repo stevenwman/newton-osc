@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--buffer", type=int, default=200_000)
     ap.add_argument("--min-buffer", type=int, default=2000)
+    ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
+                    help="OSC action: 'delta' (jax_rl-style, bounded error) or 'absolute' base-frame pose")
     args = ap.parse_args()
 
     out = Path(args.outdir)
@@ -51,9 +53,12 @@ def main():
         logf.write(s + "\n")
         logf.flush()
 
-    log(f"=== train_peg_osc: steps={args.steps} ep_len={args.episode_length} seed={args.seed} ===")
-    env = PegEnv(controller=OSCController(), episode_length=args.episode_length, seed=args.seed, weld=True)
-    log(f"obs_dim={env.obs_dim} act_dim={env.act_dim} (OSC 6-DOF pose)")
+    log(f"=== train_peg_osc: steps={args.steps} ep_len={args.episode_length} "
+        f"seed={args.seed} action_mode={args.action_mode} ===")
+    ctrl = OSCController()
+    ctrl.action_mode = args.action_mode
+    env = PegEnv(controller=ctrl, episode_length=args.episode_length, seed=args.seed, weld=True)
+    log(f"obs_dim={env.obs_dim} act_dim={env.act_dim} (OSC 6-DOF pose, {args.action_mode})")
 
     # FastSAC config — matches the validated smoke config, scaled up for a real run.
     cfg = FastSACConfig(
@@ -72,6 +77,7 @@ def main():
 
     obs = env.reset()
     ep_ret, ep_rets, last = 0.0, [], {}
+    ep_succ, ep_succs = False, []          # success = is_success reached at any step of the episode
     best = -1e9
     t0 = time.time()
 
@@ -94,10 +100,12 @@ def main():
             next_obs=nobs[None], done=np.array([float(done)], np.float32),
             truncation=np.array([info["truncation"]], np.float32))
         ep_ret += rew
+        ep_succ = ep_succ or bool(info.get("success", False))
         obs = nobs
         if done:
             ep_rets.append(ep_ret)
-            ep_ret = 0.0
+            ep_succs.append(float(ep_succ))
+            ep_ret, ep_succ = 0.0, False
             obs = env.reset()
 
         if buf.size >= cfg.min_buffer_size:
@@ -110,8 +118,10 @@ def main():
 
         if (t + 1) % 1000 == 0:
             recent = float(np.mean(ep_rets[-10:])) if ep_rets else float("nan")
+            succ_rate = float(np.mean(ep_succs[-50:])) if ep_succs else float("nan")
             sps = (t + 1) / (time.time() - t0)
             log(f"step {t+1:7d}  buf {buf.size:7d}  ep_ret(mean10) {recent:8.3f}  "
+                f"succ%(50) {100*succ_rate:5.1f}  "
                 f"q_loss {float(last.get('q1_loss', jnp.nan)):8.4f}  "
                 f"actor {float(last.get('actor_loss', jnp.nan)):8.4f}  "
                 f"alpha {float(last.get('alpha', jnp.nan)):.4f}  eps {len(ep_rets):4d}  {sps:5.1f} sps")

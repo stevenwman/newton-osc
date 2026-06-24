@@ -44,6 +44,14 @@ class PegEnv:
         self.solver = newton.solvers.SolverMuJoCo(
             self.model, use_mujoco_contacts=True,
             nconmax=1024, njmax=4096, iterations=100, ls_iterations=50)
+        if weld:
+            # Match jax_rl's deliberately-stiffened grasp weld (solref 0.001 / solimp
+            # dimp->1 ~ rigid). Newton's add_equality default (solref 0.02) is too
+            # soft -- the peg visibly flops on the gripper. Weld = equality index 1
+            # (index 0 = panda finger coupling).
+            M = self.solver.mjw_model
+            sr = M.eq_solref.numpy().copy(); sr[..., 1, :] = (0.001, 1.0); M.eq_solref.assign(sr)
+            si = M.eq_solimp.numpy().copy(); si[..., 1, :3] = (0.999, 0.9999, 0.001); M.eq_solimp.assign(si)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -59,7 +67,11 @@ class PegEnv:
         self.hole_pos = HOLE_NOMINAL.copy()
 
         self.act_dim = self.controller.action_dim
-        self.obs_dim = 7 + 7 + 3 + 4
+        # obs = robot joint state (q,qd) + held-peg pose relative to the goal hole
+        # (peg is welded to the EE, so this is the EE-task state) + absolute goal
+        # hole position + last action (jax_rl includes the action in the obs).
+        self.obs_dim = 7 + 7 + 3 + 4 + 3 + self.act_dim
+        self._last_action = np.zeros(self.act_dim, np.float32)
         self.steps = 0
         self.controller.setup(self)
 
@@ -86,7 +98,9 @@ class PegEnv:
         jqd = self.state_0.joint_qd.numpy()
         peg = self.state_0.body_q.numpy()[scene.PEG_BODY_IDX]
         peg_rel = peg[:3] - self.hole_pos
-        return np.concatenate([jq[:7], jqd[:7], peg_rel, peg[3:7]]).astype(np.float32)
+        return np.concatenate([
+            jq[:7], jqd[:7], peg_rel, peg[3:7], self.hole_pos, self._last_action,
+        ]).astype(np.float32)
 
     # -- gym API ------------------------------------------------------------
     def reset(self):
@@ -136,14 +150,19 @@ class PegEnv:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self, action):
+        self._last_action = np.asarray(action, np.float32).reshape(-1)[:self.act_dim]
         self.controller.set_action(self, action)
         self._substep()
         self.steps += 1
         peg = self.state_0.body_q.numpy()[scene.PEG_BODY_IDX]
+        peg_wxyz = _wxyz(peg[3:7])
+        hole_top_z = jnp.asarray(self.hole_pos[2] + ASSET_HEIGHT)
         reward = float(peg_reward.compute_reward(
-            held_pos=jnp.asarray(peg[:3]), held_quat=_wxyz(peg[3:7]),
+            held_pos=jnp.asarray(peg[:3]), held_quat=peg_wxyz,
             target_pos=jnp.asarray(self.hole_pos), target_quat=jnp.asarray([1.0, 0.0, 0.0, 0.0]),
-            peg_z=jnp.asarray(peg[2]),
-            hole_top_z=jnp.asarray(self.hole_pos[2] + ASSET_HEIGHT)))
+            peg_z=jnp.asarray(peg[2]), hole_top_z=hole_top_z))
+        success = bool(peg_reward.is_success(
+            jnp.asarray(peg[:2]), jnp.asarray(peg[2]), peg_wxyz,
+            jnp.asarray(self.hole_pos[:2]), hole_top_z, ASSET_HEIGHT, 0.04))
         done = self.steps >= self.episode_length
-        return self._obs(), reward, done, {"truncation": float(done)}
+        return self._obs(), reward, done, {"truncation": float(done), "success": success}

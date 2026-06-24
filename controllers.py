@@ -161,6 +161,7 @@ class OSCController:
     pos_bounds = POS_BOUNDS  # clip-box half-extents; override per-instance to resize the box
     ridge = 1e-4             # DLS ridge on Lambda_inv (matches jax_rl). With the Jacobian
                              # bug fixed, cond(J M^-1 J^T) ~1e2 here, so 1e-4 is safe + tight.
+    action_mode = "absolute"  # "absolute" (a -> fixed box pose) | "delta" (jax_rl: ft+a*thresh, clipped)
     use_task = True
     use_rot = True          # include orientation in the task wrench
     use_null = True
@@ -229,12 +230,21 @@ class OSCController:
         #        nominal each step (no SO(3) accumulation drift). EMA smooths the action.
         a = jnp.clip(jnp.asarray(action, jnp.float32).reshape(self.nw, 6), -1.0, 1.0)
         self.ema = EMA_FACTOR * a + (1.0 - EMA_FACTOR) * self.ema
-        # Absolute setpoints in the robot BASE frame: pos -> box around bore top;
-        # rot -> axis-angle deviation from the nominal EE orientation. (Pure absolute:
-        # no dependence on the current EE, so a fixed action = a fixed setpoint.)
         anchor = jnp.asarray(env.hole_pos) + jnp.array([0.0, 0.0, ASSET_HEIGHT])
-        self.target_pos = anchor + jnp.einsum('nij,nj->ni', self.base_R, self.ema[:, :3] * self.pos_bounds)
-        self.target_R = self.nominal_R @ rotvec_to_mat(self.ema[:, 3:] * ROT_THRESHOLD)
+        if self.action_mode == "delta":
+            # jax_rl style: per-step pose delta from the CURRENT EE, clipped to a box
+            # around the bore. Keeps the task error bounded (one delta); target_R
+            # accumulates. Works now that the Jacobian is fixed.
+            ft_pos, _ = self._fingertip(env.solver.mjw_data)
+            pos_delta = self.ema[:, :3] * POS_THRESHOLD
+            self.target_pos = jnp.clip(ft_pos + pos_delta, anchor - self.pos_bounds, anchor + self.pos_bounds)
+            self.target_R = self.target_R @ rotvec_to_mat(self.ema[:, 3:] * ROT_THRESHOLD)
+        else:
+            # absolute base-frame setpoint: a fixed action -> a fixed pose (no current-EE
+            # dependence). pos -> box around bore top (base_R axes); rot -> deviation
+            # from the nominal EE orientation.
+            self.target_pos = anchor + jnp.einsum('nij,nj->ni', self.base_R, self.ema[:, :3] * self.pos_bounds)
+            self.target_R = self.nominal_R @ rotvec_to_mat(self.ema[:, 3:] * ROT_THRESHOLD)
 
     def apply(self, env):
         # Refresh kinematics/dynamics at the CURRENT qpos. mujoco_warp's step does
