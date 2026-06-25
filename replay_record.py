@@ -25,9 +25,11 @@ from jax_rl.algos.fast_sac import FastSAC
 from jax_rl.configs.fast_sac_config import FastSACConfig
 from jax_rl.algos.flash_sac import FlashSAC
 from jax_rl.configs.flash_sac_config import FlashSACConfig
+from jax_rl.algos.ppo import PPO
+from jax_rl.configs.ppo_config import PPOConfig
+from jax_rl.configs.networks_config import EncoderConfig, PolicyHeadConfig
+from jax_rl.utils import normalization as nrm
 from controllers import OSCController
-from peg_env import PegEnv
-import peg_scene_newton as scene
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--ckpt", default="runs/osc_peg/best_actor.pkl")
@@ -38,19 +40,39 @@ ap.add_argument("--fps", type=int, default=30)
 ap.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
 ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
                 help="must match the action mode the checkpoint was trained with")
-ap.add_argument("--algo", choices=["fastsac", "flashsac"], default="fastsac",
+ap.add_argument("--algo", choices=["fastsac", "flashsac", "ppo"], default="fastsac",
                 help="which algo produced the checkpoint")
+ap.add_argument("--env", choices=["peg", "square"], default="peg")
+ap.add_argument("--gain-mode", choices=["fixed", "single", "axis"], default="fixed")
 args = ap.parse_args()
+
+if args.env == "square":
+    from peg_env_square import PegEnv
+    import peg_scene_square as scene
+else:
+    from peg_env import PegEnv
+    import peg_scene_newton as scene
 
 ctrl = OSCController()
 ctrl.action_mode = args.action_mode
+ctrl.gain_mode = args.gain_mode
 env = PegEnv(controller=ctrl, episode_length=args.episode_length, weld=True)
 
 # Rebuild the algo with the SAME cfg/dims used for training, just to get select_action.
 actor_bs = None      # FlashSAC needs BatchNorm running stats; FastSAC doesn't
+ppo_norm = None      # PPO needs the obs normalizer
 with open(args.ckpt, "rb") as f:
     loaded = pickle.load(f)
-if args.algo == "flashsac":
+if args.algo == "ppo":
+    cfg = PPOConfig(policy_hidden_dim=(256, 256), value_hidden_dim=(256, 256),
+                    activation="swish", squash=True, state_dependent_std=False)
+    cfg.num_envs = 1; cfg.minibatch_size = 1
+    cfg.encoder = EncoderConfig(obs_dim=env.obs_dim, hidden_dim=cfg.policy_hidden_dim, activation=cfg.activation)
+    cfg.critic_encoder = EncoderConfig(obs_dim=env.obs_dim, hidden_dim=cfg.value_hidden_dim, activation=cfg.activation)
+    cfg.policy_head = PolicyHeadConfig(action_dim=env.act_dim, squash=True, state_dependent_std=False)
+    algo = PPO(cfg, env.obs_dim, env.act_dim, optax.adam(3e-4), optax.adam(3e-4))
+    actor_params, ppo_norm = loaded["actor_params"], loaded["norm_state"]
+elif args.algo == "flashsac":
     cfg = FlashSACConfig(num_blocks=2, actor_hidden_dim=128, critic_hidden_dim=256,
                          expansion=4, num_atoms=101, v_min=-5.0, v_max=5.0)
     algo = FlashSAC(cfg, env.obs_dim, env.act_dim, optax.adamw(3e-4), optax.adam(3e-4),
@@ -84,9 +106,13 @@ for ep in range(args.episodes):
     peg_min_z = 1e9
     for i in range(args.episode_length):
         key, k = jax.random.split(key)
-        _kw = {"actor_batch_stats": actor_bs} if args.algo == "flashsac" else {}
-        a = algo.select_action(actor_params, jnp.asarray(obs)[None], k,
-                               deterministic=not args.stochastic, **_kw)
+        if args.algo == "ppo":
+            normed = nrm.normalize(ppo_norm, jnp.asarray(obs)[None])
+            a = algo.select_action_eval(actor_params, normed)   # deterministic mean (tanh-squashed)
+        else:
+            _kw = {"actor_batch_stats": actor_bs} if args.algo == "flashsac" else {}
+            a = algo.select_action(actor_params, jnp.asarray(obs)[None], k,
+                                   deterministic=not args.stochastic, **_kw)
         obs, rew, done, info = env.step(np.asarray(a[0]))
         ep_ret += float(np.asarray(rew).reshape(-1)[0])
         peg = env.state_0.body_q.numpy()[scene.PEG_BODY_IDX]

@@ -138,7 +138,7 @@ def main():
         key, k = jax.random.split(key)
         ts, m = ppo.update(ts, batch, k, next_obs=normed_next)   # symmetric critic
 
-        if (it + 1) % 20 == 0:
+        if (it + 1) % 10 == 0:                          # log + best-save every 10 iters
             recent = float(np.mean(ep_rets[-50:])) if ep_rets else float("nan")
             succ = float(np.mean(ep_succs[-200:])) if ep_succs else float("nan")
             envstep = (it + 1) * args.num_steps * N
@@ -147,11 +147,14 @@ def main():
                 f"succ%(200) {100*succ:5.1f}  ploss {float(m.get('policy_loss', jnp.nan)):8.4f}  "
                 f"vloss {float(m.get('value_loss', jnp.nan)):8.3f}  "
                 f"ent {float(m.get('entropy', jnp.nan)):6.3f}  eps {len(ep_rets):5d}  {sps:7.0f} env-sps")
+            snap = {"actor_params": jax.device_get(ts.actor_params),
+                    "norm_state": jax.device_get(norm_state)}
+            with open(out / "latest_actor.pkl", "wb") as f:   # current policy, every 10 iters
+                pickle.dump(snap, f)
             if ep_rets and recent > best:
                 best = recent
                 with open(out / "best_actor.pkl", "wb") as f:
-                    pickle.dump({"actor_params": jax.device_get(ts.actor_params),
-                                 "norm_state": jax.device_get(norm_state)}, f)
+                    pickle.dump(snap, f)
 
     log(f"[done] {iters} iters ({iters*args.num_steps*N} env-steps), best ep_ret {best:.2f}")
     logf.close()
