@@ -112,8 +112,15 @@ class PegEnv:
         # obs (per world) = arm joint state (q,qd) + held-peg pose relative to the
         # goal hole (peg is welded to the EE -> EE-task state) + absolute goal hole
         # position + last action (jax_rl includes the action in the obs).
-        self.obs_dim = 7 + 7 + 3 + 4 + 3 + self.act_dim
+        # + ee_linvel(3) + ee_angvel(3) (task-space EE velocity, finite-diff — the
+        # signal the policy needs to feel it's stalling at the bore lip) + prev_action
+        # (action history; jax_rl feeds actions AND prev_actions).
+        self.obs_dim = 7 + 7 + 3 + 4 + 3 + self.act_dim + 6 + self.act_dim
         self._last_action = jnp.zeros((N, self.act_dim), jnp.float32)
+        self._prev_action = jnp.zeros((N, self.act_dim), jnp.float32)
+        self._prev_ft_pos = None        # for finite-diff EE velocity
+        self._prev_ft_R = None
+        self._ctrl_dt = scene.SUBSTEPS * scene.SIM_DT
         self.steps = 0
         self.last_finite = True
 
@@ -156,14 +163,33 @@ class PegEnv:
         q[:, 12:16] = hand_q                               # warp quat = xyzw
         self.model.joint_q.assign(q.reshape(-1))
 
+    def _ee_vel(self):
+        """Task-space EE velocity by finite-diff of the fingertip pose between control
+        steps. Angular vel from the skew part of R_curr·R_prevᵀ (no quat, no near-pi
+        singularity — matches the controller's matrix-only convention). First call
+        after reset returns zeros (no prev). Side-effect: advances the prev pose."""
+        d = self.solver.mjw_data
+        ft_pos, ft_R = self.controller._fingertip(d)        # (N,3), (N,3,3)
+        if self._prev_ft_pos is None:
+            lin = jnp.zeros((self.num_envs, 3)); ang = jnp.zeros((self.num_envs, 3))
+        else:
+            lin = (ft_pos - self._prev_ft_pos) / self._ctrl_dt
+            dR = jnp.einsum('nij,nkj->nik', ft_R, self._prev_ft_R)   # R_curr @ R_prevᵀ
+            skew = 0.5 * (dR - jnp.transpose(dR, (0, 2, 1)))
+            ang = jnp.stack([skew[:, 2, 1], skew[:, 0, 2], skew[:, 1, 0]], axis=-1) / self._ctrl_dt
+        self._prev_ft_pos, self._prev_ft_R = ft_pos, ft_R
+        return lin, ang
+
     def _obs(self):
         N = self.num_envs
         jq = wp.to_jax(self.state_0.joint_q).reshape(N, self.ncoord)
         jqd = wp.to_jax(self.state_0.joint_qd).reshape(N, self.ndof)
         peg = wp.to_jax(self.state_0.body_q).reshape(N, self.nbody, 7)[:, PEG_BODY_LOCAL]
         peg_rel = peg[:, :3] - self.hole_pos
+        ee_lin, ee_ang = self._ee_vel()
         return jnp.concatenate([
-            jq[:, :7], jqd[:, :7], peg_rel, peg[:, 3:7], self.hole_pos, self._last_action,
+            jq[:, :7], jqd[:, :7], peg_rel, peg[:, 3:7], self.hole_pos,
+            self._last_action, ee_lin, ee_ang, self._prev_action,
         ], axis=1).astype(jnp.float32)                     # (N, obs_dim)
 
     # -- gym API ------------------------------------------------------------
@@ -213,6 +239,10 @@ class PegEnv:
         self.control.joint_f.zero_()          # hand a clean force buffer to the controller
         self.controller.reset(self)
         self.steps = 0
+        self._last_action = jnp.zeros((N, self.act_dim), jnp.float32)
+        self._prev_action = jnp.zeros((N, self.act_dim), jnp.float32)
+        self._prev_ft_pos = None              # first _obs velocity = 0
+        self._prev_ft_R = None
         return self._obs()
 
     def _substep(self):
@@ -224,6 +254,7 @@ class PegEnv:
 
     def step(self, action):
         N = self.num_envs
+        self._prev_action = self._last_action          # shift: prev_action = last step's action
         self._last_action = jnp.asarray(action, jnp.float32).reshape(N, self.act_dim)
         self.controller.set_action(self, action)
         self._substep()

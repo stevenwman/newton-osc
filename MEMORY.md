@@ -233,3 +233,43 @@ QUESTION still: does scale push succ% off 0? (single-env plateaued at succ%=0).
   (bigger sim kernels). Per control step: SUBSTEPS=4 sol.steps @ iterations=100/ls=50 (heavy
   contact solve = the env-sps cap). Lowering solver iters would speed sim but risks the
   stiff weld / OSC fidelity (untested).
+
+## FlashSAC SOLVES the peg insertion (95.5% succ) — the algo was the gap, not the env
+
+The succ%=0 plateau was an ALGORITHM problem, not env/OSC/reward. The jax-learning run
+that solves FactoryPegInsert uses **FlashSAC** (BatchNorm+weight-norm residual blocks,
+adaptive reward normalization, Zeta-distributed noise-repetition exploration, asymmetric-
+capable C51 critic), NOT FastSAC. Vendored FlashSAC verbatim (minimal closure: `jax_rl/
+algos/flash_sac.py`, `configs/flash_sac_config.py`, `networks/flash_blocks.py`, `utils/
+reward_scaling.py`; distributions/distributional/polyak reused from the FastSAC closure).
+`train_peg_flashsac.py` = off-policy loop (adapted from jax-learning scripts/train_flashsac.py:
+Zeta-noise action selection, per-step reward-norm stats + per-sample scale_reward, cosine LR,
+actor_batch_stats threading, symmetric critic for now). Config matches the converged run's
+meta.json EXACTLY: N=128, episode 450, 2.5M steps, batch 2048, grad_updates 16 (replay ratio
+256!), gamma 0.99, atoms 101, v_min/v_max [-5,5], alpha_init 0.1, sigma_target 0.3,
+normalize_reward, G_max 5, noise_zeta_mu 2/max 16, weight_norm, lr 3e-4->1.5e-4.
+
+RESULT (`runs/flashsac_p1/`, P1 = algo swap on UNCHANGED env/OSC/30-d obs/v18 reward):
+ep_ret 110(FastSAC plateau) -> climbs past 2200 by 1.7M, **succ%(200)=95.5 at 2.3M steps**,
+deterministic eval ep_ret ~2860 (≈ jax_rl ~3000). Replay: peg reaches the bore lip & inserts
+(peg_min_z 0.069-0.080 vs FastSAC's 0.116 hover). So FlashSAC was the dominant missing piece.
+NOTE: FlashSAC select_action needs `actor_batch_stats` (BatchNorm); best_actor.pkl saves
+{actor_params, actor_batch_stats}. replay_record.py grew `--algo flashsac` to load it.
+
+REMAINING gap = SAMPLE EFFICIENCY (we hit 95% at ~2.3M, jax_rl at ~830k). Parallel-agent
+review (vs jax-learning + meta.json) found the real env diffs (many earlier "bugs" were
+false alarms — alpha/sigma match the JSON; EMA IS reset via env.reset on synchronized done;
+delta-mode action/clip/accumulated-quat match; OSC gains/inertia/ridge/torque/Jacobian match):
+1. obs: ours joint-space 30-d, NO task-space EE velocity, NO prev_actions; ref 25-d task-space
+   w/ ee_linvel+ee_angvel (finite-diff) + actions + prev_actions. **HIGHEST impact.**
+2. symmetric critic; ref has privileged 72-d asymmetric critic (FlashSAC built for it).
+3. OSC nullspace target pose differs (ours=scene.ARM_Q home, ref=IsaacLab NULLSPACE_ARM_QPOS)
+   — speculative, left as-is (our home pose deliberate; ref value may not transfer frames).
+4. reset_mode: ours synchronized full-batch, ref per-env staggered (per_step) -> buffer diversity.
+
+P2 (`runs/flashsac_p2/`, IN PROGRESS): additive obs change — kept the working 30-d, APPENDED
+ee_linvel(3)+ee_angvel(3) (finite-diff of controller `_fingertip` pose across control steps;
+angvel from skew of R_curr·R_prevᵀ, no quat singularity) + prev_action(6) -> **obs_dim=42**.
+peg_env tracks _prev_ft_pos/_prev_ft_R/_prev_action, reset clears them (first-step vel=0). Tests
+whether velocity feedback + action history close the 2.3M->~830k sample-efficiency gap. Did NOT
+change nullspace pose or build the privileged critic yet (next levers if P2 underwhelms).
