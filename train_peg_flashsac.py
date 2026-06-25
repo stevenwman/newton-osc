@@ -63,6 +63,8 @@ def main():
     ap.add_argument("--min-buffer", type=int, default=10_000, help="ref=10000")
     ap.add_argument("--buffer", type=int, default=1_000_000)
     ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta")
+    ap.add_argument("--gain-mode", choices=["fixed", "single", "axis"], default="fixed",
+                    help="variable impedance: fixed gains | single Kp/zeta scalar | per-axis Kp/zeta")
     ap.add_argument("--no-reward-norm", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", default="runs/flashsac_p1")
@@ -84,9 +86,11 @@ def main():
 
     ctrl = OSCController()
     ctrl.action_mode = args.action_mode
+    ctrl.gain_mode = args.gain_mode
     env = PegEnv(controller=ctrl, episode_length=args.episode_length, seed=args.seed,
                  weld=True, num_envs=N)
-    log(f"obs_dim={env.obs_dim} act_dim={env.act_dim} (P1: symmetric critic, current OSC/obs)")
+    log(f"obs_dim={env.obs_dim} act_dim={env.act_dim} gain_mode={args.gain_mode} "
+        f"(symmetric critic, current OSC/obs)")
 
     cfg = FlashSACConfig(
         num_blocks=2, actor_hidden_dim=128, critic_hidden_dim=256, expansion=4,

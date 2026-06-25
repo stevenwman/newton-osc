@@ -33,7 +33,12 @@ POS_THRESHOLD = jnp.array([0.02, 0.02, 0.02])
 ROT_THRESHOLD = jnp.array([0.097, 0.097, 0.097])
 POS_BOUNDS = jnp.array([0.02, 0.02, 0.10])           # cube around bore top
 KP_TASK = jnp.array([100.0, 100.0, 100.0, 30.0, 30.0, 30.0])
-KD_TASK = jnp.array([20.0, 20.0, 20.0, 10.954, 10.954, 10.954])
+KD_TASK = jnp.array([20.0, 20.0, 20.0, 10.954, 10.954, 10.954])   # = 2*sqrt(KP_TASK) (critical)
+# Variable-impedance: extra action dims let the policy scale stiffness Kp and the
+# damping ratio zeta (Kd = 2*zeta*sqrt(Kp_eff)). Both map log-scale from base:
+# scale = 2^(a), a in [-1,1] -> [0.5, 2]x. At a=0 -> scale 1 -> base gains exactly.
+GAIN_LOG2 = 1.0                          # 2^±1 = [0.5, 2]x range
+GAIN_DIMS = {"fixed": 0, "single": 2, "axis": 12}   # extra action dims per mode
 KP_NULL, KD_NULL = 10.0, 6.3246
 KD_JOINT = 8.0          # explicit joint-space damping (stabilizes the OSC)
 TORQUE_LIMIT = 100.0
@@ -156,8 +161,14 @@ class JointPositionController:
 
 # ============================================================================
 class OSCController:
-    """6-D operational-space pose-delta action -> Khatib OSC -> joint torques."""
-    action_dim = 6
+    """6-D operational-space pose-delta action -> Khatib OSC -> joint torques.
+
+    gain_mode adds variable-impedance action dims (see GAIN_DIMS):
+      "fixed"  -> 6 dims (pose only), gains constant at base (baseline policy).
+      "single" -> 8 dims: + [Kp_scale, zeta] applied to ALL task axes.
+      "axis"   -> 18 dims: + [Kp_scale x6, zeta x6] per task axis.
+    """
+    gain_mode = "fixed"
     pos_bounds = POS_BOUNDS  # clip-box half-extents; override per-instance to resize the box
     ridge = 1e-4             # DLS ridge on Lambda_inv (matches jax_rl). With the Jacobian
                              # bug fixed, cond(J M^-1 J^T) ~1e2 here, so 1e-4 is safe + tight.
@@ -176,6 +187,10 @@ class OSCController:
     last_qvel = 0.0
     last_ft_pos = None      # EE point fed to the OSC (world frame) — for debug viz
     last_ft_R = None        # EE orientation (world<-EE) — for debug viz
+
+    @property
+    def action_dim(self):
+        return 6 + GAIN_DIMS[self.gain_mode]
 
     def configure(self, builder, arm_init, finger):
         # Arm left in NONE mode (no servo); OSC drives it via control.joint_f.
@@ -218,7 +233,9 @@ class OSCController:
         self.target_pos = ft_pos
         self.target_R = ft_R
         self.last_ft_pos = np.asarray(ft_pos[0])
-        self.ema = jnp.zeros((self.nw, 6))
+        self.ema = jnp.zeros((self.nw, self.action_dim))   # full action (pose + gain dims)
+        self.kp_scale = jnp.ones((self.nw, 6))             # per-axis Kp multiplier
+        self.zeta = jnp.ones((self.nw, 6))                 # per-axis damping ratio (1=critical)
 
     def set_action(self, env, action):
         # ABSOLUTE target in the robot BASE frame (not delta-from-current-EE, which
@@ -228,8 +245,17 @@ class OSCController:
         #   rot: axis-angle deviation (scaled by ROT_THRESHOLD) from the nominal EE
         #        orientation -> target_R = nominal_R @ exp(a_rot). Recomputed from
         #        nominal each step (no SO(3) accumulation drift). EMA smooths the action.
-        a = jnp.clip(jnp.asarray(action, jnp.float32).reshape(self.nw, 6), -1.0, 1.0)
+        a = jnp.clip(jnp.asarray(action, jnp.float32).reshape(self.nw, self.action_dim), -1.0, 1.0)
         self.ema = EMA_FACTOR * a + (1.0 - EMA_FACTOR) * self.ema
+        # Variable-impedance gain dims (after the 6 pose dims). EMA-smoothed like the
+        # pose. scale = 2^(GAIN_LOG2 * a_ema) -> [0.5,2]x at a=±1; base (1x) at a=0.
+        if self.gain_mode == "single":
+            self.kp_scale = jnp.broadcast_to((2.0 ** (GAIN_LOG2 * self.ema[:, 6:7])), (self.nw, 6))
+            self.zeta = jnp.broadcast_to((2.0 ** (GAIN_LOG2 * self.ema[:, 7:8])), (self.nw, 6))
+        elif self.gain_mode == "axis":
+            self.kp_scale = 2.0 ** (GAIN_LOG2 * self.ema[:, 6:12])
+            self.zeta = 2.0 ** (GAIN_LOG2 * self.ema[:, 12:18])
+        # else "fixed": kp_scale/zeta stay ones (set in reset)
         anchor = jnp.asarray(env.hole_pos) + jnp.array([0.0, 0.0, ASSET_HEIGHT])
         if self.action_mode == "delta":
             # jax_rl style: per-step pose delta from the CURRENT EE, clipped to a box
@@ -238,13 +264,13 @@ class OSCController:
             ft_pos, _ = self._fingertip(env.solver.mjw_data)
             pos_delta = self.ema[:, :3] * POS_THRESHOLD
             self.target_pos = jnp.clip(ft_pos + pos_delta, anchor - self.pos_bounds, anchor + self.pos_bounds)
-            self.target_R = self.target_R @ rotvec_to_mat(self.ema[:, 3:] * ROT_THRESHOLD)
+            self.target_R = self.target_R @ rotvec_to_mat(self.ema[:, 3:6] * ROT_THRESHOLD)
         else:
             # absolute base-frame setpoint: a fixed action -> a fixed pose (no current-EE
             # dependence). pos -> box around bore top (base_R axes); rot -> deviation
             # from the nominal EE orientation.
             self.target_pos = anchor + jnp.einsum('nij,nj->ni', self.base_R, self.ema[:, :3] * self.pos_bounds)
-            self.target_R = self.nominal_R @ rotvec_to_mat(self.ema[:, 3:] * ROT_THRESHOLD)
+            self.target_R = self.nominal_R @ rotvec_to_mat(self.ema[:, 3:6] * ROT_THRESHOLD)
 
     def apply(self, env):
         # Refresh kinematics/dynamics at the CURRENT qpos. mujoco_warp's step does
@@ -280,10 +306,15 @@ class OSCController:
         rot_err = ori_error(ft_R, self.target_R) if self.use_rot else jnp.zeros((self.nw, 3))
         self.last_pos_err = float(jnp.linalg.norm(pos_err))
         self.last_rot_err = float(jnp.linalg.norm(rot_err))
-        rot_wrench = (KP_TASK[3:] * rot_err - KD_TASK[3:] * ft_vel[:, 3:]) if self.use_rot \
+        # Variable-impedance effective gains (per-axis): Kp_eff = base*kp_scale,
+        # Kd_eff = 2*zeta*sqrt(Kp_eff). gain_mode="fixed" -> kp_scale=zeta=1 ->
+        # Kp_eff=KP_TASK, Kd_eff=2*sqrt(KP_TASK)=KD_TASK (bit-identical to before).
+        kp_eff = KP_TASK * self.kp_scale                 # (nw,6)
+        kd_eff = 2.0 * self.zeta * jnp.sqrt(kp_eff)       # (nw,6)
+        rot_wrench = (kp_eff[:, 3:] * rot_err - kd_eff[:, 3:] * ft_vel[:, 3:]) if self.use_rot \
             else jnp.zeros_like(rot_err)
         wrench = jnp.concatenate([
-            KP_TASK[:3] * pos_err - KD_TASK[:3] * ft_vel[:, :3],
+            kp_eff[:, :3] * pos_err - kd_eff[:, :3] * ft_vel[:, :3],
             rot_wrench,
         ], axis=-1)                                     # (nw,6)
 
