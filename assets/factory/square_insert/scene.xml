@@ -1,0 +1,86 @@
+<mujoco model="factory_square_insert">
+  <!--
+    Square-peg / square-socket variant of factory_peg_insert (see SQUARE_PEG_PLAN.md).
+
+    vs the cylindrical peg_insert/scene.xml:
+      - Peg: capsule -> BOX (8x8x42mm, half-extents 0.004 0.004 0.021). Box inertia
+        sphericalized (Izz bumped to Ixx) like the cylinder, to avoid weld tilt AND
+        stabilize the now-relevant yaw DOF.
+      - Hole: 32 mesh bore tiles -> 4 BOX WALLS + floor forming a square socket
+        (opening 8.8mm square = 8mm peg + 0.4mm/side clearance; 2mm walls; z span
+        local -5..+35mm). All primitives -> no mesh assets.
+      - Everything else (weld 0 0 -0.130, finger-peg excludes, panda include, mocap
+        hole) unchanged. Peg half-length 21mm == cylinder, so the weld offset holds.
+
+    Hole world pos 0.6 0 0.05 -> opening top at world z=0.075 (0.05 + local 0.025).
+    Square has 4-fold symmetry -> yaw aligns mod 90 deg (reward/success/DR handle it).
+  -->
+
+  <option timestep="0.002" integrator="implicitfast"
+          iterations="200" tolerance="1e-10" solver="Newton">
+    <flag eulerdamp="enable"/>
+  </option>
+  <compiler angle="radian" autolimits="true"/>
+
+  <visual>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.45 0.45 0.45" specular="0.1 0.1 0.1"/>
+    <rgba haze="0.6 0.6 0.65 1"/>
+    <global offwidth="640" offheight="480"/>
+  </visual>
+
+  <include file="../franka_panda/panda.xml"/>
+
+  <worldbody>
+    <light name="scene_key"  pos="0.5 -0.5 1.5" dir="0 0 -1" diffuse="0.55 0.55 0.55" specular="0.1 0.1 0.1"/>
+    <light name="scene_fill" pos="0.5  0.5 1.0" dir="0 0 -1" diffuse="0.35 0.35 0.35"/>
+    <geom name="render_floor" type="plane" size="2 2 0.02" pos="0 0 -0.001"
+          rgba="0.85 0.85 0.88 1" contype="0" conaffinity="0"/>
+
+    <!-- Square socket = an 88mm SLAB (10x the 8.8mm hole) with a centered square
+         hole, tiled by 4 pinwheel prisms (each (L+s)x(L-s) = 48.4x39.6mm, rotated
+         90deg, interlocking around the hole — exact tiling, hole left open).
+         outer half L=0.044, hole half s=0.0044; z center 0.015, half-height 0.020
+         (slab spans local z -0.005..+0.035, world 0.045..0.085). + blind floor.
+         (L+s)/2=0.0242, (L-s)/2=0.0198. mocap body = kinematic infinite-mass collider. -->
+    <body name="hole_base" pos="0.6 0 0.05" mocap="true">
+      <geom name="slab_top" type="box" pos="-0.0198 0.0242 0.015" size="0.0242 0.0198 0.020"
+            condim="6" friction="1.0 0.01 0.0001"
+            solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
+      <geom name="slab_right" type="box" pos="0.0242 0.0198 0.015" size="0.0198 0.0242 0.020"
+            condim="6" friction="1.0 0.01 0.0001"
+            solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
+      <geom name="slab_bottom" type="box" pos="0.0198 -0.0242 0.015" size="0.0242 0.0198 0.020"
+            condim="6" friction="1.0 0.01 0.0001"
+            solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
+      <geom name="slab_left" type="box" pos="-0.0242 -0.0198 0.015" size="0.0198 0.0242 0.020"
+            condim="6" friction="1.0 0.01 0.0001"
+            solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
+      <!-- Blind floor stops the peg at the socket bottom (covers the 8.8mm hole). -->
+      <geom name="bore_floor" type="box" pos="0 0 -0.003" size="0.0064 0.0064 0.001"
+            condim="6" friction="1.0 0.01 0.0001"
+            solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.6 0.6 0.62 1"/>
+    </body>
+
+    <!-- Peg: freejoint + box geom. Welded to hand for the whole episode. -->
+    <body name="peg" pos="0.5 0.0 0.3">
+      <freejoint/>
+      <!-- Box inertia m=0.019, dims 8x8x42mm: Ixx=Iyy=2.89e-6, Izz=2.03e-7.
+           Sphericalized to Izz=Ixx (well-conditioned rotational inertia under weld;
+           also damps the yaw DOF that now matters for the square peg). -->
+      <inertial pos="0 0 0" mass="0.019" diaginertia="2.894e-6 2.894e-6 2.894e-6"/>
+      <geom name="peg" type="box" size="0.004 0.004 0.021" condim="6"
+            friction="1.0 0.01 0.0001" rgba="0.2 0.6 0.9 1"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <weld name="grasp" body1="peg" body2="hand"
+          relpose="0 0 -0.130 1 0 0 0" active="true"
+          solref="0.001 1" solimp="0.999 0.9999 0.001"/>
+  </equality>
+
+  <contact>
+    <exclude body1="left_finger" body2="peg"/>
+    <exclude body1="right_finger" body2="peg"/>
+  </contact>
+</mujoco>

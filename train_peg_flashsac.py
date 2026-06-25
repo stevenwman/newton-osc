@@ -40,7 +40,6 @@ from jax_rl.buffers.jax_replay_buffer import JaxReplayBuffer
 from jax_rl.configs.flash_sac_config import FlashSACConfig
 from jax_rl.utils.reward_scaling import update_reward_stats, scale_reward
 from controllers import OSCController
-from peg_env import PegEnv
 
 
 def _make_zeta_cdf(mu: float, max_n: int) -> jnp.ndarray:
@@ -65,6 +64,8 @@ def main():
     ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta")
     ap.add_argument("--gain-mode", choices=["fixed", "single", "axis"], default="fixed",
                     help="variable impedance: fixed gains | single Kp/zeta scalar | per-axis Kp/zeta")
+    ap.add_argument("--env", choices=["peg", "square"], default="peg",
+                    help="peg = cylindrical bore | square = box peg + square slab socket")
     ap.add_argument("--no-reward-norm", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", default="runs/flashsac_p1")
@@ -84,6 +85,10 @@ def main():
         f"ep_len={args.episode_length} batch={args.batch_size} grad={args.grad_updates} "
         f"seed={args.seed} action_mode={args.action_mode} ===")
 
+    if args.env == "square":
+        from peg_env_square import PegEnv
+    else:
+        from peg_env import PegEnv
     ctrl = OSCController()
     ctrl.action_mode = args.action_mode
     ctrl.gain_mode = args.gain_mode

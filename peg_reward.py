@@ -76,6 +76,22 @@ def _peg_aligned(peg_quat: jp.ndarray,
     return _peg_cos_dot(peg_quat) > cos_threshold
 
 
+def _peg_yaw(peg_quat: jp.ndarray) -> jp.ndarray:
+    """Yaw of the peg's local x-axis in the world xy-plane (rad). quat=(w,x,y,z)."""
+    w, x, y, z = peg_quat[0], peg_quat[1], peg_quat[2], peg_quat[3]
+    xx = 1.0 - 2.0 * (y * y + z * z)    # R[0,0]
+    xy = 2.0 * (x * y + w * z)          # R[1,0]
+    return jp.arctan2(xy, xx)
+
+
+def yaw_error(peg_quat: jp.ndarray, hole_yaw: jp.ndarray, period: float) -> jp.ndarray:
+    """Peg-vs-hole yaw error wrapped into [-period/2, period/2]. period=pi/2 for a
+    square peg (4-fold), pi for a rectangular one (2-fold)."""
+    e = _peg_yaw(peg_quat) - hole_yaw
+    half = 0.5 * period
+    return jp.mod(e + half, period) - half
+
+
 def _physically_alignable(
     peg_xy: jp.ndarray, hole_xy: jp.ndarray, peg_quat: jp.ndarray,
     xy_threshold: float = _XY_PROXIMITY_THRESHOLD,
@@ -126,6 +142,9 @@ def compute_reward(
     tilt_cos_threshold: float = _TILT_COS_THRESHOLD,
     num_keypoints: int = 4,
     entry_z: float = _ENTRY_Z,
+    yaw_period: float = None,        # None -> no yaw term (cylindrical, inert).
+    hole_yaw: jp.ndarray = 0.0,      # square: pi/2 (4-fold) + the socket's yaw.
+    yaw_tol: float = 0.0873,         # success yaw tolerance (~5 deg)
 ) -> jp.ndarray:
     """Phased reward — Phase A align + Phase B aligned-descent / dead-end + success.
 
@@ -159,7 +178,16 @@ def compute_reward(
     r_tilt = squashing_fn(tilt_rad, 50.0, 0.0)          # max 0.5 at tilt=0
     # altitude_bonus: 0 at z = entry_z + 10cm, 1 at z = entry_z.
     altitude_bonus = jp.clip((entry_z + 0.10 - peg_z) / 0.10, 0.0, 1.0)
-    r_align = 2.0 * (r_xy + r_tilt) * altitude_bonus    # max 2.0 (at z≤entry)
+    # yaw term (square/rect peg only). yaw_ok soft-gates descent + success on the
+    # peg matching the socket's yaw (mod period). yaw_period is bound at trace time.
+    if yaw_period is None:
+        r_align = 2.0 * (r_xy + r_tilt) * altitude_bonus    # max 2.0 (at z≤entry)
+        yaw_ok = 1.0
+    else:
+        ye = yaw_error(held_quat, hole_yaw, yaw_period)
+        r_yaw = squashing_fn(ye, 20.0, 0.0)             # max 0.5 at yaw-aligned
+        r_align = (4.0 / 3.0) * (r_xy + r_tilt + r_yaw) * altitude_bonus  # max ~2.0
+        yaw_ok = jax.nn.sigmoid((yaw_tol - jp.abs(ye)) * 200.0)
 
     # Phase factor: ~1 above entry, ~0 below. Smooth so the critic sees a
     # clean gradient through the boundary.
@@ -173,7 +201,7 @@ def compute_reward(
     aligned_xy = jax.nn.sigmoid(
         (2.0 * _XY_PROXIMITY_THRESHOLD - xy_dist) * 1000.0)
     aligned_tilt = jax.nn.sigmoid((cos_dot - 0.998) * 5000.0)
-    aligned = aligned_xy * aligned_tilt
+    aligned = aligned_xy * aligned_tilt * yaw_ok    # yaw_ok=1 for cylindrical
     # z_progress anchored at entry_z (peg tip crossing bore opening), NOT
     # hole_top_z (peg body crossing bore opening — fires too late, leaves
     # a 2cm dead zone where tip is descending into the bore but body still
@@ -199,6 +227,6 @@ def compute_reward(
         asset_height, success_threshold,
         xy_threshold=success_xy_threshold,
         tilt_cos_threshold=tilt_cos_threshold,
-    ).astype(jp.float32) * 5.0
+    ).astype(jp.float32) * 5.0 * yaw_ok      # square: terminal bonus needs yaw too
 
     return r_align + r_B_desc + r_B_pen + r_floor + r_success
