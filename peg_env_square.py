@@ -129,7 +129,10 @@ class PegEnv:
         # + ee_linvel(3) + ee_angvel(3) (task-space EE velocity, finite-diff — the
         # signal the policy needs to feel it's stalling at the bore lip) + prev_action
         # (action history; jax_rl feeds actions AND prev_actions).
-        self.obs_dim = 7 + 7 + 3 + 4 + 3 + self.act_dim + 6 + self.act_dim
+        # + 2 for the GOAL yaw [cos(hole_yaw), sin(hole_yaw)] — the square peg must
+        # match the socket's (randomized ±30°) yaw, so the policy MUST observe it.
+        # (sin/cos avoids the wrap discontinuity of raw yaw.)
+        self.obs_dim = 7 + 7 + 3 + 4 + 3 + self.act_dim + 6 + self.act_dim + 2
         self._last_action = jnp.zeros((N, self.act_dim), jnp.float32)
         self._prev_action = jnp.zeros((N, self.act_dim), jnp.float32)
         self._prev_ft_pos = None        # for finite-diff EE velocity
@@ -212,9 +215,10 @@ class PegEnv:
         peg = wp.to_jax(self.state_0.body_q).reshape(N, self.nbody, 7)[:, PEG_BODY_LOCAL]
         peg_rel = peg[:, :3] - self.hole_pos
         ee_lin, ee_ang = self._ee_vel()
+        goal_yaw = jnp.stack([jnp.cos(self.hole_yaw), jnp.sin(self.hole_yaw)], axis=-1)  # (N,2)
         return jnp.concatenate([
             jq[:, :7], jqd[:, :7], peg_rel, peg[:, 3:7], self.hole_pos,
-            self._last_action, ee_lin, ee_ang, self._prev_action,
+            self._last_action, ee_lin, ee_ang, self._prev_action, goal_yaw,
         ], axis=1).astype(jnp.float32)                     # (N, obs_dim)
 
     # -- gym API ------------------------------------------------------------
