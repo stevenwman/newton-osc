@@ -23,7 +23,7 @@ N = 512
 EP_LEN = 450
 SIGMAS = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0]   # normalized-obs units; knee ~1-3
 GAINS = ["fixed", "single", "axis"]
-TARGETS = ["perception", "goal", "both"]
+TARGETS = ["full"]   # perception/goal/both already in noise_eval.npz; merge full in
 CKPT = {g: f"runs/sq_vic_{g}/best_actor.pkl" for g in GAINS}
 OUT = "runs/sq_vic_noise"
 
@@ -37,8 +37,9 @@ def field_idx(A):
     gyaw = list(range(30 + 2 * A, 32 + 2 * A))      # goal_yaw
     perception = peg + eevel
     goal = hole + gyaw
+    full = list(range(32 + 2 * A))                  # every obs dim (incl. proprioception + actions)
     return {"perception": np.array(perception), "goal": np.array(goal),
-            "both": np.array(sorted(set(perception + goal)))}
+            "both": np.array(sorted(set(perception + goal))), "full": np.array(full)}
 
 
 def build(gm):
@@ -92,12 +93,16 @@ def main():
                 print(f"[noise] {gm:6s} {tgt:10s} sigma={s:.2f}  succ={100*sc:5.1f}%", flush=True)
             results[gm][tgt] = row
         del env, ppo
-    # flatten to arrays for npz
-    save = {"sigmas": np.array(SIGMAS)}
+    # merge into existing npz (keep perception/goal/both already computed)
+    path = os.path.join(OUT, "noise_eval.npz")
+    save = {}
+    if os.path.exists(path):
+        old = np.load(path); save = {k: old[k] for k in old.files}
+    save["sigmas"] = np.array(SIGMAS)
     for gm in GAINS:
         for tgt in TARGETS:
             save[f"{gm}__{tgt}"] = np.array(results[gm][tgt])
-    np.savez(os.path.join(OUT, "noise_eval.npz"), **save)
+    np.savez(path, **save)
     print(f"[noise] saved {OUT}/noise_eval.npz")
 
 

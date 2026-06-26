@@ -10,10 +10,10 @@ OUT = "runs/sq_vic_noise"
 d = np.load(os.path.join(OUT, "noise_eval.npz"))
 sig = d["sigmas"]
 GAINS = ["fixed", "single", "axis"]
-TARGETS = ["perception", "goal", "both"]
+TARGETS = ["perception", "goal", "both", "full"]
 COL = {"fixed": "C0", "single": "C1", "axis": "C2"}
 
-fig, ax = plt.subplots(1, 3, figsize=(15, 4.5), sharey=True)
+fig, ax = plt.subplots(1, len(TARGETS), figsize=(5 * len(TARGETS), 4.5), sharey=True)
 for j, tgt in enumerate(TARGETS):
     for gm in GAINS:
         y = 100 * d[f"{gm}__{tgt}"]
