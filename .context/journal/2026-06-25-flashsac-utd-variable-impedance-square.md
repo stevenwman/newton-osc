@@ -110,3 +110,59 @@ lower given the extra yaw alignment).
    interpretable stiff-z/soft-xy strategy.
 4. **Box-box contact** needs far more solver constraint rows than round-peg contact
    — size njmax from the observed nefc, mind the O(N²) efc_J at high N.
+
+---
+
+## Day 2 cont. — PPO migration, the square solve, variable impedance + noise robustness
+
+**Vendored PPO (on-policy) alongside FlashSAC** to compare regimes (commits a4b4a60,
+cf2ce67). Minimal closure: `jax_rl/algos/ppo.py`, `configs/ppo_config.py`,
+`buffers/rollout.py` (GAE), `utils/normalization.py`; networks/heads/distributions
+shared. `train_peg_ppo.py` = on-policy loop (collect num_steps×N rollout → GAE →
+num_epochs×num_minibatches clipped updates, running obs-norm). `--env {peg,square}`.
+Our action is OSC-bounded → squash=True (vs jax_rl's joint-space squash=False).
+
+**PPO vs FlashSAC — circular peg:** both solve. FlashSAC ~10× more sample-efficient
+(90% @ 448k vs PPO ~4.6M), but PPO's ~2.7× higher env-throughput (on-policy, few
+grads/step: ~1050 vs 390 env-sps) nearly cancels it → **wall-clock ~tie (~17–25 min
+to 2k reward)**. Sample efficiency favors FlashSAC; throughput favors PPO.
+
+**The square SOLVE — goal-yaw observability was the real unlock.** Both algos
+stalled on the square (FlashSAC 8.5%, PPO ~30%). Root cause: the obs gave the peg's
+OWN orientation but the GOAL as **position only** — the ±30°-randomized socket yaw
+was **invisible**, so a square peg that must match it could only guess. Fix: append
+`[cos,sin](hole_yaw)` to the square obs (commit d3da1f3). PPO then **solved it:
+30%→99.5%** (crossed 50% at 2.95M vs never-in-8M blind). The square needed, in impact
+order: (1) **goal-yaw in obs** (the unlock), (2) bigger margin (16mm peg / 2.4mm/side,
+sized by eye via `peg_in_hole_view.py`), (3) box-box njmax fix.
+
+**PPO > FlashSAC on the square.** With goal-yaw, FlashSAC improved (8.5%→71.5% peak)
+but **plateaus ~70%** (off-policy hover/yaw local optima); PPO solves 99.5%.
+On-policy + entropy explores the contact/yaw landscape better. So: FlashSAC for the
+easy circular (sample-efficient), **PPO for the hard contact+yaw square**.
+
+**Square variable-impedance 3-way (PPO, commit 45a81b3):** fixed/single/axis all
+SOLVE (100/99/98.5%). Unlike the round peg's steady stiff-z/soft-lateral, the square
+axis policy **spikes all gains ~1.9× during the insertion transient then relaxes**
+("stiffen to drive in, soften to hold"). VIC pushes HARDER (|F|max 0.28→0.63 N) —
+counterintuitive until you note the gain range is symmetric [0.5,2]×, so the policy
+exploits the STIFF half (2× fixed's authority) to seat the square against corners.
+New viz: `vic_ellipsoid_record.py` renders a transparent **wireframe compliance
+ellipsoid** at the EE (radii ∝ 1/Kp; log_lines has no alpha → wireframe = see-through).
+
+**Obs-noise robustness (commit b531418):** `vic_noise_eval.py` sweeps Gaussian noise
+(normalized-obs units) on perception / goal / both, succ% over 512 eps/cell. Result:
+**per-axis VIC is the MOST noise-robust, global-scalar (single) the LEAST (worse than
+fixed).** σ@50%: perception fixed 3.0 / single 3.0 / **axis 4.0**; at σ=3 perception
+axis holds 64% vs fixed 25% vs single 10%. Per-axis compliance forgives perception
+error (soft directions absorb corrupted targets); one global gain can't adapt
+directionally. Goal-noise gentle for all (low-dim). Plot: `runs/sq_vic_noise/`.
+
+### More takeaways
+5. **Observability beats algorithm tuning** — the square was unsolvable because the
+   policy couldn't see the goal yaw it had to match. Check the obs exposes the task.
+6. **PPO (on-policy) > FlashSAC (off-policy) on the contact+yaw square**; reverse on
+   the easy circular (sample efficiency). Algorithm choice is task-dependent.
+7. **"Variable impedance" ≠ softer** — with a symmetric [0.5,2]× range the policy
+   stiffens beyond fixed to seat (higher peak force), AND it's the most obs-noise
+   robust. Per-axis is the win; global-scalar (single) hurts robustness.
