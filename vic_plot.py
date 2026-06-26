@@ -11,9 +11,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-RUNS = {"fixed": "runs/vic_fixed", "single": "runs/vic_single", "axis": "runs/vic_axis"}
+import sys
+PREFIX = sys.argv[1] if len(sys.argv) > 1 else "runs/vic"   # e.g. "runs/sq_vic"
+RUNS = {"fixed": f"{PREFIX}_fixed", "single": f"{PREFIX}_single", "axis": f"{PREFIX}_axis"}
 AXES = ["x", "y", "z", "rx", "ry", "rz"]
-OUT = "runs/vic_plots"
+OUT = f"{PREFIX}_plots"
 os.makedirs(OUT, exist_ok=True)
 
 data = {k: np.load(os.path.join(v, "traj.npz")) for k, v in RUNS.items()}
