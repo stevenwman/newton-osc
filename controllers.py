@@ -124,6 +124,46 @@ def ori_error(R_cur, R_des):
                   + jnp.cross(R_cur[..., 2], R_des[..., 2]))
 
 
+from functools import partial
+
+
+@partial(jax.jit, static_argnames=("use_rot", "use_task", "use_null", "use_bias", "ridge"))
+def _osc_core(jacp, jacr, qvel, qpos, qM, bias, target_pos, ft_pos, ft_R, target_R,
+              kp_scale, zeta, use_rot=True, use_task=True, use_null=True, use_bias=True,
+              ridge=1e-4):
+    """Fused OSC math (Khatib op-space -> arm torques), JIT'd into ONE XLA kernel so
+    the per-substep cost isn't dozens of tiny eager launches (the N=1 bottleneck).
+    All warp<->jax I/O stays OUTSIDE; this is pure jnp. Bit-identical to the eager
+    path that was inlined in apply()."""
+    nw = qM.shape[0]
+    J_arm = jnp.concatenate([jacp, jacr], axis=1)[:, :, :ARM_DOF]   # (nw,6,7)
+    ft_vel = jnp.einsum('nij,nj->ni', J_arm, qvel)
+    pos_err = target_pos - ft_pos
+    rot_err = ori_error(ft_R, target_R) if use_rot else jnp.zeros((nw, 3))
+    kp_eff = KP_TASK * kp_scale
+    kd_eff = 2.0 * zeta * jnp.sqrt(kp_eff)
+    rot_wrench = (kp_eff[:, 3:] * rot_err - kd_eff[:, 3:] * ft_vel[:, 3:]) if use_rot \
+        else jnp.zeros_like(rot_err)
+    wrench = jnp.concatenate([kp_eff[:, :3] * pos_err - kd_eff[:, :3] * ft_vel[:, :3],
+                              rot_wrench], axis=-1)
+    M_inv = jnp.linalg.inv(qM)
+    Lam_inv = J_arm @ M_inv @ J_arm.transpose(0, 2, 1) + ridge * jnp.eye(6)
+    Lam = jnp.linalg.inv(Lam_inv)
+    Jbar = M_inv @ J_arm.transpose(0, 2, 1) @ Lam
+    null_proj = jnp.eye(ARM_DOF) - Jbar @ J_arm
+    tau_null = jnp.einsum('nij,nj->ni', null_proj,
+                          jnp.einsum('nij,nj->ni', qM, KP_NULL * (NULLSPACE_Q - qpos) - KD_NULL * qvel))
+    tau_task = jnp.einsum('nij,nj->ni', J_arm.transpose(0, 2, 1),
+                          jnp.einsum('nij,nj->ni', Lam, wrench))
+    tau = tau_task if use_task else jnp.zeros_like(tau_task)
+    if use_null:
+        tau = tau + tau_null
+    tau = tau - KD_JOINT * qvel
+    if use_bias:
+        tau = tau + bias
+    return jnp.clip(tau, -TORQUE_LIMIT, TORQUE_LIMIT)
+
+
 # ============================================================================
 class JointPositionController:
     """7-D joint-position-delta action -> position servos on the arm."""
@@ -169,6 +209,7 @@ class OSCController:
       "axis"   -> 18 dims: + [Kp_scale x6, zeta x6] per task axis.
     """
     gain_mode = "fixed"
+    debug = False            # True -> compute last_* diagnostics (each forces a host sync)
     pos_bounds = POS_BOUNDS  # clip-box half-extents; override per-instance to resize the box
     ridge = 1e-4             # DLS ridge on Lambda_inv (matches jax_rl). With the Jacobian
                              # bug fixed, cond(J M^-1 J^T) ~1e2 here, so 1e-4 is safe + tight.
@@ -282,8 +323,9 @@ class OSCController:
         mjw.forward(env.solver.mjw_model, env.solver.mjw_data)
         d = env.solver.mjw_data
         ft_pos, ft_R = self._fingertip(d)
-        self.last_ft_pos = np.asarray(ft_pos[0])
-        self.last_ft_R = np.asarray(ft_R[0])
+        if self.debug:                                  # np.asarray forces a host sync
+            self.last_ft_pos = np.asarray(ft_pos[0])
+            self.last_ft_R = np.asarray(ft_R[0])
         # Fingertip Jacobian at the world point (on-GPU, batched). from_jax with
         # dtype=vec3 maps the (nw,3) array -> (nw,) vec3 (the flatten+view form only
         # worked at nw=1 — a flat (3*nw,) array can't be .view'd back to vec3).
@@ -291,60 +333,23 @@ class OSCController:
         mjw.jac(env.solver.mjw_model, d, self._jacp, self._jacr, pt, self._body)
         jacp = wp.to_jax(self._jacp)                    # (nw,3,nv)
         jacr = wp.to_jax(self._jacr)
-        J = jnp.concatenate([jacp, jacr], axis=1)       # (nw,6,nv)
-        J_arm = J[:, :, :ARM_DOF]                       # (nw,6,7)
 
         qvel = wp.to_jax(d.qvel)[:, :ARM_DOF]           # (nw,7)
         qpos = wp.to_jax(d.qpos)[:, :ARM_DOF]           # (nw,7)
         qM = wp.to_jax(d.qM)[:, :ARM_DOF, :ARM_DOF]     # (nw,7,7)
         bias = wp.to_jax(d.qfrc_bias)[:, :ARM_DOF]      # (nw,7) gravity+coriolis
 
-        ft_vel = jnp.einsum('nij,nj->ni', J_arm, qvel)  # (nw,6)
-        pos_err = self.target_pos - ft_pos
-        # Stable world-frame orientation error (robosuite cross-product form) — NOT
-        # axis-angle-via-matrix-log, which has a biased/singular gradient near 0 and pi.
-        rot_err = ori_error(ft_R, self.target_R) if self.use_rot else jnp.zeros((self.nw, 3))
-        self.last_pos_err = float(jnp.linalg.norm(pos_err))
-        self.last_rot_err = float(jnp.linalg.norm(rot_err))
-        # Variable-impedance effective gains (per-axis): Kp_eff = base*kp_scale,
-        # Kd_eff = 2*zeta*sqrt(Kp_eff). gain_mode="fixed" -> kp_scale=zeta=1 ->
-        # Kp_eff=KP_TASK, Kd_eff=2*sqrt(KP_TASK)=KD_TASK (bit-identical to before).
-        kp_eff = KP_TASK * self.kp_scale                 # (nw,6)
-        kd_eff = 2.0 * self.zeta * jnp.sqrt(kp_eff)       # (nw,6)
-        rot_wrench = (kp_eff[:, 3:] * rot_err - kd_eff[:, 3:] * ft_vel[:, 3:]) if self.use_rot \
-            else jnp.zeros_like(rot_err)
-        wrench = jnp.concatenate([
-            kp_eff[:, :3] * pos_err - kd_eff[:, :3] * ft_vel[:, :3],
-            rot_wrench,
-        ], axis=-1)                                     # (nw,6)
+        # Fused OSC math (one JIT'd kernel instead of ~dozens of eager launches).
+        tau = _osc_core(jacp, jacr, qvel, qpos, qM, bias, self.target_pos, ft_pos, ft_R,
+                        self.target_R, self.kp_scale, self.zeta, use_rot=self.use_rot,
+                        use_task=self.use_task, use_null=self.use_null, use_bias=self.use_bias,
+                        ridge=self.ridge)
 
-        M_inv = jnp.linalg.inv(qM)                       # (nw,7,7)
-        # Damped-least-squares ridge: regularizes the op-space inertia inversion
-        # near kinematic singularities (caps Lambda's max eigenvalue ~1/ridge).
-        # 1e-2 keeps tau bounded where the arm is poorly conditioned.
-        Lam_inv = J_arm @ M_inv @ J_arm.transpose(0, 2, 1) + self.ridge * jnp.eye(6)
-        Lam = jnp.linalg.inv(Lam_inv)                    # (nw,6,6)
-        Jbar = M_inv @ J_arm.transpose(0, 2, 1) @ Lam    # (nw,7,6)
-        null_proj = jnp.eye(ARM_DOF) - Jbar @ J_arm      # (nw,7,7)
-        tau_null = jnp.einsum('nij,nj->ni', null_proj,
-                              jnp.einsum('nij,nj->ni', qM,
-                                         KP_NULL * (NULLSPACE_Q - qpos) - KD_NULL * qvel))
-        tau_task = jnp.einsum('nij,nj->ni', J_arm.transpose(0, 2, 1),
-                              jnp.einsum('nij,nj->ni', Lam, wrench))
-        tau = tau_task if self.use_task else jnp.zeros_like(tau_task)
-        if self.use_null:
-            tau = tau + tau_null
-        tau = tau - KD_JOINT * qvel                       # explicit joint-space damping
-        if self.use_bias:
-            tau = tau + bias
-        tau = jnp.clip(tau, -TORQUE_LIMIT, TORQUE_LIMIT)  # (nw,7)
-
-        self.last_tau_task = float(jnp.linalg.norm(tau_task))
-        self.last_tau_null = float(jnp.linalg.norm(tau_null))
-        self.last_bias = float(jnp.linalg.norm(bias))
-        self.last_tau = float(jnp.linalg.norm(tau))
-        self.last_cond = float(jnp.linalg.cond(Lam_inv[0]))
-        self.last_qvel = float(jnp.linalg.norm(qvel))
+        if self.debug:                                  # each float()/norm forces a host sync
+            self.last_pos_err = float(jnp.linalg.norm(self.target_pos - ft_pos))
+            self.last_qvel = float(jnp.linalg.norm(qvel))
+            self.last_tau = float(jnp.linalg.norm(tau))
+            self.last_bias = float(jnp.linalg.norm(bias))
 
         jf = jnp.zeros((self.nw, env.ndof))
         jf = jf.at[:, :ARM_DOF].set(tau).reshape(-1).astype(jnp.float32)
