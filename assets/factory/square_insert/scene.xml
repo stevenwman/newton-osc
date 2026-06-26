@@ -36,27 +36,26 @@
     <geom name="render_floor" type="plane" size="2 2 0.02" pos="0 0 -0.001"
           rgba="0.85 0.85 0.88 1" contype="0" conaffinity="0"/>
 
-    <!-- Square socket = an 88mm SLAB (10x the 8.8mm hole) with a centered square
-         hole, tiled by 4 pinwheel prisms (each (L+s)x(L-s) = 48.4x39.6mm, rotated
-         90deg, interlocking around the hole — exact tiling, hole left open).
-         outer half L=0.044, hole half s=0.0044; z center 0.015, half-height 0.020
-         (slab spans local z -0.005..+0.035, world 0.045..0.085). + blind floor.
-         (L+s)/2=0.0242, (L-s)/2=0.0198. mocap body = kinematic infinite-mass collider. -->
+    <!-- Square socket = a 100mm SLAB with a centered 20.8mm square hole, tiled by 4
+         pinwheel prisms (each (L+s)x(L-s), rotated 90deg — exact tiling, hole open).
+         peg 16mm + margin 2.4mm/side (doubled from v2's 1.2mm for more positional
+         room). hole half s=0.0104, outer half L=0.05; z center 0.015, half 0.020
+         (world 0.045..0.085). (L+s)/2=0.0302, (L-s)/2=0.0198. -->
     <body name="hole_base" pos="0.6 0 0.05" mocap="true">
-      <geom name="slab_top" type="box" pos="-0.0198 0.0242 0.015" size="0.0242 0.0198 0.020"
+      <geom name="slab_top" type="box" pos="-0.0198 0.0302 0.015" size="0.0302 0.0198 0.020"
             condim="6" friction="1.0 0.01 0.0001"
             solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
-      <geom name="slab_right" type="box" pos="0.0242 0.0198 0.015" size="0.0198 0.0242 0.020"
+      <geom name="slab_right" type="box" pos="0.0302 0.0198 0.015" size="0.0198 0.0302 0.020"
             condim="6" friction="1.0 0.01 0.0001"
             solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
-      <geom name="slab_bottom" type="box" pos="0.0198 -0.0242 0.015" size="0.0242 0.0198 0.020"
+      <geom name="slab_bottom" type="box" pos="0.0198 -0.0302 0.015" size="0.0302 0.0198 0.020"
             condim="6" friction="1.0 0.01 0.0001"
             solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
-      <geom name="slab_left" type="box" pos="-0.0242 -0.0198 0.015" size="0.0198 0.0242 0.020"
+      <geom name="slab_left" type="box" pos="-0.0302 -0.0198 0.015" size="0.0198 0.0302 0.020"
             condim="6" friction="1.0 0.01 0.0001"
             solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.7 0.7 0.72 1"/>
-      <!-- Blind floor stops the peg at the socket bottom (covers the 8.8mm hole). -->
-      <geom name="bore_floor" type="box" pos="0 0 -0.003" size="0.0064 0.0064 0.001"
+      <!-- Blind floor stops the peg at the socket bottom (covers the 20.8mm hole). -->
+      <geom name="bore_floor" type="box" pos="0 0 -0.003" size="0.012 0.012 0.001"
             condim="6" friction="1.0 0.01 0.0001"
             solref="0.004 1" solimp="0.98 0.995 0.001" rgba="0.6 0.6 0.62 1"/>
     </body>
@@ -64,11 +63,10 @@
     <!-- Peg: freejoint + box geom. Welded to hand for the whole episode. -->
     <body name="peg" pos="0.5 0.0 0.3">
       <freejoint/>
-      <!-- Box inertia m=0.019, dims 8x8x42mm: Ixx=Iyy=2.89e-6, Izz=2.03e-7.
-           Sphericalized to Izz=Ixx (well-conditioned rotational inertia under weld;
-           also damps the yaw DOF that now matters for the square peg). -->
-      <inertial pos="0 0 0" mass="0.019" diaginertia="2.894e-6 2.894e-6 2.894e-6"/>
-      <geom name="peg" type="box" size="0.004 0.004 0.021" condim="6"
+      <!-- Box inertia m=0.019, dims 16x16x42mm: Ixx=Iyy=3.20e-6, Izz=8.11e-7.
+           Sphericalized to Izz=Ixx (well-conditioned under weld; damps the yaw DOF). -->
+      <inertial pos="0 0 0" mass="0.019" diaginertia="3.20e-6 3.20e-6 3.20e-6"/>
+      <geom name="peg" type="box" size="0.008 0.008 0.021" condim="6"
             friction="1.0 0.01 0.0001" rgba="0.2 0.6 0.9 1"/>
     </body>
   </worldbody>
