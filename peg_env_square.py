@@ -140,6 +140,8 @@ class PegEnv:
         self._ctrl_dt = scene.SUBSTEPS * scene.SIM_DT
         self.steps = 0
         self.last_finite = True
+        self.use_graph = False        # if True + a captured graph exists, replay it for substeps
+        self._sub_graph = None
 
         # vmapped reward / success over the N worlds (the reward math is per-world
         # scalar; vmap adds the leading batch axis). target_quat is unused (del'd in
@@ -282,12 +284,27 @@ class PegEnv:
             self.solver.step(self.state_0, self.state_1, self.control, None, scene.SIM_DT)
             self.state_0, self.state_1 = self.state_1, self.state_0
 
+    def capture_substep(self):
+        """Capture the (jax-free, Warp-OSC only) substep loop into a CUDA graph.
+        Call after a warmup set_action + a few _substep()s. Requires a WarpOSCController
+        (the jax OSC has host syncs that can't be captured)."""
+        for _ in range(4):
+            self._substep()                  # warmup so all kernels are compiled
+        wp.synchronize_device()
+        with wp.ScopedCapture() as cap:
+            self._substep()
+        self._sub_graph = cap.graph
+        self.use_graph = True
+
     def step(self, action):
         N = self.num_envs
         self._prev_action = self._last_action          # shift: prev_action = last step's action
         self._last_action = jnp.asarray(action, jnp.float32).reshape(N, self.act_dim)
-        self.controller.set_action(self, action)
-        self._substep()
+        self.controller.set_action(self, action)         # jax: writes wp target buffers in-place
+        if self.use_graph and self._sub_graph is not None:
+            wp.capture_launch(self._sub_graph)            # replay captured substep loop (reads those buffers)
+        else:
+            self._substep()
         self.steps += 1
         peg = wp.to_jax(self.state_0.body_q).reshape(N, self.nbody, 7)[:, PEG_BODY_LOCAL]
         peg_pos, peg_xyzw = peg[:, :3], peg[:, 3:7]
