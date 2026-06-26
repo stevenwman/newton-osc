@@ -12,7 +12,9 @@ Context for a fresh agent picking this repo up. Read `MEMORY.md` and
 > context, but the current entry points + recipe are:
 > - **Train:** `train_peg_ppo.py` (solves square) / `train_peg_flashsac.py` — both `--env square`.
 > - **Best recipe + results:** `BEST_RECIPE.md`; square task design: `SQUARE_PEG_PLAN.md`.
-> - **Record:** `replay_record.py --env square --algo {ppo,flashsac}`; fast path: `vic_decouple_record.py`.
+> - **Record:** `replay_record.py --env square --algo {ppo,flashsac}`; fast path: `analysis/vic_decouple_record.py`.
+> - **Layout:** core modules (`controllers*.py`, `peg_*.py`) + trainers + `replay_record.py` at root;
+>   eval/viz/bench one-offs in **`analysis/`** (run `PYTHONPATH=. python analysis/<script>.py`).
 > - **Current narrative:** `.context/journal/2026-06-25-*` (square solve, VIC, noise) and
 >   `2026-06-26-*` (single-env perf: Warp OSC + CUDA-graph).
 > - **Perf (single-env):** `controllers_warp.py` (Warp OSC) + `env.capture_substep()` give ~4.9× via CUDA graph.
