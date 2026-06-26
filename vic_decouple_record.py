@@ -24,6 +24,9 @@ ap.add_argument("--gain-mode", default="axis")
 ap.add_argument("--episode-length", type=int, default=450)
 ap.add_argument("--fps", type=int, default=30)
 ap.add_argument("--out", default="runs/sq_vic_decouple")
+ap.add_argument("--with-old", action="store_true",
+                help="also run the old jax+render-every-step path (uses a 2nd ViewerGL -> "
+                     "its decoupled render goes black; only for timing, run alone for a valid video)")
 args = ap.parse_args()
 CKPT = f"runs/sq_vic_{args.gain_mode}/best_actor.pkl"
 os.makedirs(args.out, exist_ok=True)
@@ -63,21 +66,23 @@ def frame(viewer):
 
 
 # ───────────────────────── OLD: jax OSC + render every control step ─────────────
-env, c, ppo, ap_, ns = build(OSCController)
-viewer = newton.viewer.ViewerGL(headless=True); viewer.set_model(env.model)
-viewer.set_camera(pos=wp.vec3(0.78, -0.42, 0.30), pitch=-26.0, yaw=118.0)
-o = env.reset()
-for _ in range(5):                                           # warmup
-    o, _, _, _ = env.step(np.asarray(ppo.select_action_eval(ap_, nrm.normalize(ns, jnp.asarray(o)))))
-env.rng = np.random.default_rng(0); o = env.reset(); wp.synchronize_device()
-t0 = time.time(); frames = []; tt = 0.0
-for i in range(args.episode_length):
-    o, r, d, info = env.step(np.asarray(ppo.select_action_eval(ap_, nrm.normalize(ns, jnp.asarray(o)))))
-    viewer.begin_frame(tt); viewer.log_state(env.state_0); viewer.end_frame()
-    frames.append(frame(viewer)); tt += 1.0 / args.fps
-wp.synchronize_device(); t_old = time.time() - t0
-iio.mimwrite(f"{args.out}/old_rawdog.mp4", frames, fps=args.fps, macro_block_size=2)
-viewer.close(); del env, ppo
+t_old = None
+if args.with_old:
+    env, c, ppo, ap_, ns = build(OSCController)
+    viewer = newton.viewer.ViewerGL(headless=True); viewer.set_model(env.model)
+    viewer.set_camera(pos=wp.vec3(0.78, -0.42, 0.30), pitch=-26.0, yaw=118.0)
+    o = env.reset()
+    for _ in range(5):                                       # warmup
+        o, _, _, _ = env.step(np.asarray(ppo.select_action_eval(ap_, nrm.normalize(ns, jnp.asarray(o)))))
+    env.rng = np.random.default_rng(0); o = env.reset(); wp.synchronize_device()
+    t0 = time.time(); frames = []; tt = 0.0
+    for i in range(args.episode_length):
+        o, r, d, info = env.step(np.asarray(ppo.select_action_eval(ap_, nrm.normalize(ns, jnp.asarray(o)))))
+        viewer.begin_frame(tt); viewer.log_state(env.state_0); viewer.end_frame()
+        frames.append(frame(viewer)); tt += 1.0 / args.fps
+    wp.synchronize_device(); t_old = time.time() - t0
+    iio.mimwrite(f"{args.out}/old_rawdog.mp4", frames, fps=args.fps, macro_block_size=2)
+    viewer.close(); del env, ppo
 
 # ───────────────────────── NEW: (A) headless graph sim store states ─────────────
 env, c, ppo, ap_, ns = build(WarpOSCController)
@@ -106,7 +111,9 @@ iio.mimwrite(f"{args.out}/decoupled.mp4", frames, fps=args.fps, macro_block_size
 viewer.close(); t_render = time.time() - t0
 
 print(f"\n=== recording one {args.episode_length}-step trajectory ({args.gain_mode}) ===")
-print(f"  OLD  (jax OSC + render every step): {t_old:5.1f}s  ({args.episode_length} frames)")
+if t_old is not None:
+    print(f"  OLD  (jax OSC + render every step): {t_old:5.1f}s  ({args.episode_length} frames)")
 print(f"  NEW  headless graph sim (store):    {t_sim:5.1f}s")
 print(f"  NEW  offline render @ {args.fps}fps:      {t_render:5.1f}s  ({len(frames)} frames, stride {STRIDE})")
-print(f"  NEW  total:                         {t_sim + t_render:5.1f}s  -> {t_old/(t_sim+t_render):.2f}x faster")
+tot = t_sim + t_render
+print(f"  NEW  total:                         {tot:5.1f}s" + (f"  -> {t_old/tot:.2f}x faster" if t_old else ""))

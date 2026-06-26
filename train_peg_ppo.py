@@ -37,7 +37,7 @@ from controllers import OSCController
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--env", choices=["peg", "square"], default="peg")
+    ap.add_argument("--env", choices=["square"], default="square")  # cylindrical archived
     ap.add_argument("--gain-mode", choices=["fixed", "single", "axis"], default="fixed")
     ap.add_argument("--num-envs", type=int, default=128)
     ap.add_argument("--total-steps", type=int, default=5_000_000)
@@ -68,10 +68,7 @@ def main():
         f"num_steps={args.num_steps} minibatches={args.num_minibatches} epochs={args.num_epochs} "
         f"seed={args.seed} ===")
 
-    if args.env == "square":
-        from peg_env_square import PegEnv
-    else:
-        from peg_env import PegEnv
+    from peg_env_square import PegEnv         # square is the only env (cylindrical archived)
     ctrl = OSCController(); ctrl.action_mode = args.action_mode; ctrl.gain_mode = args.gain_mode
     env = PegEnv(controller=ctrl, episode_length=args.episode_length, seed=args.seed,
                  weld=True, num_envs=N)

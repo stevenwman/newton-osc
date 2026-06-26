@@ -42,16 +42,12 @@ ap.add_argument("--action-mode", choices=["absolute", "delta"], default="delta",
                 help="must match the action mode the checkpoint was trained with")
 ap.add_argument("--algo", choices=["fastsac", "flashsac", "ppo"], default="fastsac",
                 help="which algo produced the checkpoint")
-ap.add_argument("--env", choices=["peg", "square"], default="peg")
+ap.add_argument("--env", choices=["square"], default="square")  # cylindrical archived
 ap.add_argument("--gain-mode", choices=["fixed", "single", "axis"], default="fixed")
 args = ap.parse_args()
 
-if args.env == "square":
-    from peg_env_square import PegEnv
-    import peg_scene_square as scene
-else:
-    from peg_env import PegEnv
-    import peg_scene_newton as scene
+from peg_env_square import PegEnv             # square is the only env (cylindrical archived)
+import peg_scene_square as scene
 
 ctrl = OSCController()
 ctrl.action_mode = args.action_mode
